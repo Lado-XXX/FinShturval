@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0e14">
-<title>Штурвал · 2026-07-30y</title>
+<title>Штурвал · 2026-07-30ab</title>
 
 <style>
 :root{
@@ -134,7 +134,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30y';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ab';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -1304,18 +1304,56 @@ function contributionPlan(state, flow = { rows: [] }, amountOpt = null) {
   const byTicker = new Map((flow.rows || []).map(r => [r.ticker, r]));
   const owned = state.positions.filter(p => p.qty > 0);
 
+  // Веса секторов до взноса — чтобы не загонять деньги в перегруженную отрасль.
+  const sectorValue = {};
+  for (const p of owned) {
+    if (allocationClass(p) !== 'stocks') continue;
+    const sec = p.sector || sectorOf(p);
+    if (sec) sectorValue[sec] = (sectorValue[sec] || 0) + positionValue(p);
+  }
+  const totalAfter = s.securities + amount;
+
   const steps = split.map(part => {
-    const candidates = owned
-      .filter(p => allocationClass(p) === part.cls)
-      .sort((a, b) => {
-        const ra = byTicker.get(a.ticker), rb = byTicker.get(b.ticker);
-        return (rb?.ytm ?? rb?.yieldPct ?? 0) - (ra?.ytm ?? ra?.yieldPct ?? 0);
-      });
-    const pick = candidates[0] || null;
+    const inClass = owned.filter(p => allocationClass(p) === part.cls);
+    const byYield = [...inClass].sort((a, b) => {
+      const ra = byTicker.get(a.ticker), rb = byTicker.get(b.ticker);
+      return (rb?.ytm ?? rb?.yieldPct ?? 0) - (ra?.ytm ?? ra?.yieldPct ?? 0);
+    });
+
+    // Доходность — не единственное правило. Докупать бумагу, которая после
+    // покупки перевалит за лимит доли (или добьёт сектор), нельзя: иначе
+    // приложение противоречило бы собственному совету «не докупай её».
+    const okAfter = p => {
+      const after = (positionValue(p) + part.sum) / totalAfter;
+      if (after > LIMITS.singlePosition) return false;
+      if (part.cls === 'stocks') {
+        const sec = p.sector || sectorOf(p);
+        if (sec && ((sectorValue[sec] || 0) + part.sum) / totalAfter > LIMITS.sectorMax) return false;
+      }
+      return true;
+    };
+    // Бумага, которая УЖЕ за лимитом, исключается всегда: доливать в неё —
+    // прямое противоречие совету «не докупай её».
+    const notOverYet = p => positionValue(p) / s.securities <= LIMITS.singlePosition;
+
+    // Сначала те, кто и после покупки останется в пределах. Если таких нет
+    // (в маленьком портфеле любая покупка — большая доля), берём лучшую из
+    // тех, кто хотя бы не перегружен сейчас: иначе портфель не смог бы расти.
+    const allowed = byYield.filter(p => notOverYet(p) && okAfter(p));
+    const fallback = byYield.filter(notOverYet);
+
+    const pick = allowed[0] || fallback[0] || null;
+    const blocked = !pick && byYield.length > 0;
     const lots = pick && pick.price > 0 ? Math.floor(part.sum / pick.price) : null;
     return { cls: part.cls, amount: Math.round(part.sum),
              ticker: pick ? pick.ticker : null, name: pick ? pick.name : null,
-             price: pick ? pick.price : null, lots };
+             price: pick ? pick.price : null, lots,
+             // Причина молчания важнее молчания: человек должен понимать,
+             // почему бумага не названа.
+             blocked, blockReason: blocked
+               ? `Все бумаги этого класса уже у предела доли (${Math.round(LIMITS.singlePosition * 100)}% на бумагу, `
+                 + `${Math.round(LIMITS.sectorMax * 100)}% на сектор) — докупать их значит усиливать перекос. Нужна новая бумага.`
+               : null };
   });
   return { amount, steps };
 }
@@ -1968,8 +2006,35 @@ const MONTHS = 12;
 /** Годовая волатильность по классам — историческая, не прогноз. */
 const VOLATILITY = { stocks: 0.30, bonds: 0.08, hedge: 0.18 };
 
+/**
+ * Допущения о доходности классов. Держатся в одном месте и называются
+ * допущениями, потому что таковыми и являются: акции и золото предсказать
+ * нельзя. Облигации — исключение: их доходность к погашению известна, и
+ * подставлять вместо неё константу значит считать хуже, чем можешь.
+ */
+const ASSUMED = { stocks: 0.13, bonds: 0.12, hedge: 0.06 };
+
+/**
+ * Ставки для прогноза по конкретному портфелю: доходность облигаций берётся
+ * фактическая (средневзвешенная к погашению по твоим бумагам), остальное —
+ * из допущений. Возвращает и пометку, что именно измерено, а что принято
+ * на веру: пользователь имеет право знать, откуда взялось число.
+ */
+function ratesFor(bondYtm) {
+  const measured = bondYtm > 0.01 && bondYtm < 1;
+  return {
+    rates: { ...ASSUMED, bonds: measured ? bondYtm : ASSUMED.bonds },
+    measured: measured ? ['bonds'] : [],
+    note: measured
+      ? `Облигации — по фактической доходности твоих бумаг к погашению (${(bondYtm * 100).toFixed(1)}%). `
+        + `Акции ${(ASSUMED.stocks * 100).toFixed(0)}% и защита ${(ASSUMED.hedge * 100).toFixed(0)}% — допущения: будущую доходность никто не знает.`
+      : `Доходность принята по историческим допущениям: акции ${(ASSUMED.stocks * 100).toFixed(0)}%, облигации ${(ASSUMED.bonds * 100).toFixed(0)}%, защита ${(ASSUMED.hedge * 100).toFixed(0)}%. `
+        + `Как только биржа отдаст доходность твоих облигаций, она подставится вместо допущения.`
+  };
+}
+
 /** Ожидаемая доходность портфеля из его состава. */
-function expectedReturn(byClass, securities, rates = { stocks: 0.13, bonds: 0.12, hedge: 0.06 }) {
+function expectedReturn(byClass, securities, rates = ASSUMED) {
   if (!(securities > 0)) return rates.stocks;
   let sum = 0;
   for (const [cls, value] of Object.entries(byClass)) {
@@ -1978,14 +2043,41 @@ function expectedReturn(byClass, securities, rates = { stocks: 0.13, bonds: 0.12
   return sum;
 }
 
-/** Волатильность портфеля из его состава. */
+/**
+ * Связь классов между собой. Именно ради неё держат разные активы: если бы
+ * всё падало одновременно, смешивать было бы незачем. Числа — устоявшиеся
+ * оценки, а не измерение: акции и облигации слабо связаны, золото обычно
+ * ходит против акций.
+ */
+const CORRELATION = {
+  stocks: { stocks: 1, bonds: 0.2, hedge: -0.2 },
+  bonds:  { stocks: 0.2, bonds: 1, hedge: 0.1 },
+  hedge:  { stocks: -0.2, bonds: 0.1, hedge: 1 }
+};
+
+/**
+ * Волатильность портфеля из его состава.
+ *
+ * Считается по-настоящему — через ковариации, а не средним взвешенным.
+ * Средневзвешенная завышала бы риск: она молча предполагает, что все классы
+ * падают одновременно и одинаково. На деле смесь колеблется слабее своих
+ * частей, и именно эта разница — то, что даёт распределение по классам.
+ */
 function portfolioVolatility(byClass, securities) {
   if (!(securities > 0)) return VOLATILITY.stocks;
-  let sum = 0;
-  for (const [cls, value] of Object.entries(byClass)) {
-    sum += (value / securities) * (VOLATILITY[cls] ?? 0.2);
+  const keys = ['stocks', 'bonds', 'hedge'];
+  const w = {}, sigma = {};
+  for (const k of keys) {
+    w[k] = (byClass[k] || 0) / securities;
+    sigma[k] = VOLATILITY[k] ?? 0.2;
   }
-  return sum;
+  let variance = 0;
+  for (const i of keys) {
+    for (const j of keys) {
+      variance += w[i] * w[j] * sigma[i] * sigma[j] * (CORRELATION[i]?.[j] ?? 0);
+    }
+  }
+  return variance > 0 ? Math.sqrt(variance) : 0;
 }
 
 /** Будущая стоимость при регулярных пополнениях. Чистая арифметика. */
@@ -2059,9 +2151,9 @@ function outcomeRange(start, monthly, years, expected, volatility, yearlyBonus =
  * год в плюсе сверх внесённого. Не предсказание конкретного исхода —
  * частота из прогонки случайных сценариев при исторической волатильности.
  */
-function yearOutlook(byClass, securities, monthly = 0) {
+function yearOutlook(byClass, securities, monthly = 0, rates) {
   if (!(securities > 0)) return null;
-  const expected = expectedReturn(byClass, securities);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
   const vol = portfolioVolatility(byClass, securities);
   const range = outcomeRange(securities, monthly, 1, expected, vol);
   const base = securities + monthly * 12;
@@ -2080,7 +2172,8 @@ function goalProgress(state) {
   const monthly = Number(state.settings?.monthlyContribution) || 0;
   const rate = Number(state.settings?.ndflRate) || 0.13;
   const yearlyBonus = Math.min(monthly * 12, 400000) * rate;
-  const expected = expectedReturn(state.summary?.byClass || {}, state.summary?.securities || 0);
+  const expected = expectedReturn(state.summary?.byClass || {}, state.summary?.securities || 0,
+    ratesFor(Number(state.settings?.bondYtm) || 0).rates);
   const reachIn = yearsToGoal(total, monthly, goal, expected, yearlyBonus);
   return {
     goal, total, monthly,
@@ -2138,12 +2231,12 @@ function gauss() {
  * Полный разбор цели: сходится план или нет, и какие есть рычаги.
  * Возвращает готовый ответ на вопрос «дойду ли я и что менять».
  */
-function analyzeGoal({ current, monthly, goal, years, byClass, securities, taxRefund = 0 }) {
+function analyzeGoal({ current, monthly, goal, years, byClass, securities, taxRefund = 0, rates }) {
   if (!(goal > 0)) {
     return { hasGoal: false, message: 'Цель не задана — укажи сумму, и я посчитаю план.' };
   }
 
-  const expected = expectedReturn(byClass, securities);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
   const volatility = portfolioVolatility(byClass, securities);
 
   const reachIn = yearsToGoal(current, monthly, goal, expected, taxRefund);
@@ -2192,7 +2285,7 @@ function buildLevers({ current, monthly, goal, years, expected, taxRefund, reach
   return out;
 }
 
-return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle};
+return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle, ratesFor, ASSUMED_RATES: ASSUMED};
 })());
 
 /* ─── data/db.js ─── */
@@ -4799,9 +4892,20 @@ async function cashflowSummary(state) {
     });
   }
 
+  // Средневзвешенная доходность к погашению по своим облигациям: измеренная
+  // величина, которая дальше заменяет допущение в прогнозе.
+  let bondValue = 0, bondWeighted = 0;
+  for (const r of rows) {
+    if (r.kind !== 'bond' || !(r.ytm > 0)) continue;
+    const pos = state.positions.find(p => p.ticker === r.ticker);
+    const v = pos ? pos.qty * pos.price : 0;
+    if (v > 0) { bondValue += v; bondWeighted += v * r.ytm; }
+  }
+
   rows.sort((a, b) => (b.perYear || 0) - (a.perYear || 0));
   return {
     rows, totalNet,
+    bondYtm: bondValue > 0 ? bondWeighted / bondValue : null,
     yieldOnPortfolio: state.summary.securities > 0 ? totalNet / state.summary.securities : 0,
     monthly: Math.round(totalNet / 12)
   };
@@ -4991,6 +5095,10 @@ async function getState() {
     // раньше неё счёта не было.
     iisOpenDate: meta.iisOpenDate || (ops.length ? ops.map(o => o.date).sort()[0] : null),
     iisTermYears: meta.iisTermYears || 5,
+    // Измеренная доходность своих облигаций к погашению. Прогноз подставит
+    // её вместо допущения; протухшую (старше месяца) не берём.
+    bondYtm: (meta.bondYtm && meta.bondYtm.value > 0
+      && daysBetween(meta.bondYtm.date, today()) <= 31) ? meta.bondYtm.value : null,
     prices: meta.prices || {},          // последние известные цены
     lastPriceUpdate: meta.lastPriceUpdate || null,
     lastSync: meta.lastSync || null,
@@ -5062,6 +5170,7 @@ async function getState() {
       years: settings.goal.years,
       byClass: summary.byClass,
       securities: summary.securities,
+      rates: ratesFor(settings.bondYtm || 0).rates,
       taxRefund: Math.round(Math.min(yearContributions(ops), 400000) * settings.ndflRate)
     })
   };
@@ -5632,6 +5741,7 @@ const allocate = SH.allocate;
 const allocationClass = SH.allocationClass;
 const analyzeBuy = SH.analyzeBuy;
 const analyzeGoal = SH.analyzeGoal;
+const ratesFor = SH.ratesFor;
 const applySync = SH.applySync;
 const bondFacts = SH.bondFacts;
 const bondYieldToMaturity = SH.bondYieldToMaturity;
@@ -5963,12 +6073,14 @@ function viewHome(st) {
             ? `При текущем темпе цель придёт примерно через ${g.reachIn} лет — к ${g.etaYear} году. Учтены взносы, налоговый вычет и ожидаемая доходность состава.`
             : `При нынешнем темпе цель дальше пятидесяти лет — загляни в «Что стоит сделать»: там посчитаны рычаги.`}
         </div>
-        <div class="muted" style="margin-top:6px;opacity:.7">Это не обещание: будущая доходность неизвестна, разброс исходов — в прогнозе.</div>
+        <div class="muted" style="margin-top:6px;opacity:.7">Это не обещание: будущая доходность неизвестна, разброс исходов — в прогнозе.
+          ${esc(store.ratesFor(st.settings.bondYtm || 0).note)}</div>
         ${(() => {
           const years = Number(st.settings.goal?.years) || 0;
           const monthly = Number(st.settings.monthlyContribution) || 0;
           const bonus = Math.min(monthly * 12, 400000) * (Number(st.settings.ndflRate) || 0.13);
-          const exp = store.expectedReturn(st.summary.byClass, st.summary.securities);
+          const r = store.ratesFor(st.settings.bondYtm || 0);
+          const exp = store.expectedReturn(st.summary.byClass, st.summary.securities, r.rates);
           const n = whatMovesTheNeedle(g.total, monthly, years, exp, bonus);
           if (!n || !n.strongest) return '';
           return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
@@ -6921,6 +7033,35 @@ async function openDiagnostics() {
  * Один вход для всех экранов, чтобы советы и денежный поток считались
  * из одного источника и не расходились между собой.
  */
+/**
+ * Запоминаем измеренную доходность облигаций: она нужна прогнозу на главной,
+ * где сети может не быть. Хранится вместе с датой — устаревшую не берём.
+ */
+async function rememberBondYtm(flow) {
+  try {
+    if (!flow || !flow.rows) return;
+    let value = Number(flow.bondYtm) || 0;
+    if (!(value > 0)) {
+      // Данные приходят двумя путями — от брокера и с биржи, — и во втором
+      // случае средневзвешенной доходности в ответе нет. Считаем сами.
+      const st = await store.getState();
+      let sum = 0, weighted = 0;
+      for (const r of flow.rows) {
+        if (!(r.ytm > 0)) continue;
+        const pos = st.positions.find(p => p.ticker === r.ticker);
+        const v = pos ? pos.qty * pos.price : 0;
+        if (v > 0) { sum += v; weighted += v * r.ytm; }
+      }
+      value = sum > 0 ? weighted / sum : 0;
+    }
+    if (!(value > 0)) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const prev = await store.getMeta('bondYtm');
+    if (prev && prev.date === today && Math.abs((prev.value || 0) - value) < 0.0005) return;
+    await store.setMeta('bondYtm', { date: today, value });
+  } catch { /* не смогли измерить — прогноз останется на допущении */ }
+}
+
 async function portfolioFacts() {
   const token = await store.getMeta('tiToken');
   const account = await store.getMeta('tiAccount');
@@ -6928,11 +7069,13 @@ async function portfolioFacts() {
     const book = await withLimit(store.tiPortfolio(token, account), 12, null);
     if (book) {
       const facts = await withLimit(store.tiFacts(token, book.rows), 25, null);
-      if (facts && facts.rows.length) return facts;
+      if (facts && facts.rows.length) { await rememberBondYtm(facts); return facts; }
     }
   }
-  return await withLimit(store.cashflowSummary(), 10,
+  const flow = await withLimit(store.cashflowSummary(), 10,
     { rows: [], dividends: [], totalNet: 0, yieldOnPortfolio: 0, monthly: 0 });
+  await rememberBondYtm(flow);
+  return flow;
 }
 
 /** Разбор портфеля с названиями бумаг: что докупить, что переложить и почему. */
@@ -6965,7 +7108,8 @@ async function openPlan() {
       })()}</p>
 
     ${(() => {
-      const yo = yearOutlook(st.summary.byClass, st.summary.securities);
+      const yo = yearOutlook(st.summary.byClass, st.summary.securities, 0,
+        store.ratesFor(st.settings.bondYtm || 0).rates);
       if (!yo) return '';
       return `<div class="act info" style="margin-bottom:10px">
         <h2 style="font-size:16px">Ближайший год — честно о шансах</h2>
@@ -6990,8 +7134,10 @@ async function openPlan() {
         <p class="muted" style="margin:0 0 8px">${pc.overridden
           ? `В этом месяце — ${money(pc.amount)} вместо обычных ${money(pc.base)}. Со сменой месяца вернётся база; база меняется в настройках.`
           : `База — ${money(pc.base)} в месяц из настроек. Впиши другую сумму, если в этом месяце вносишь иначе, — правка живёт один месяц.`}</p>
-        ${cp.steps.map(t => `<p style="margin:6px 0">${money(t.amount)} → <b>${t.name ? esc(t.name) : `${clsName[t.cls]}: подходящей бумаги в портфеле нет, нужно выбрать`}</b>${
-          t.lots != null ? (t.lots > 0 ? ` — примерно ${t.lots} шт по ${t.price} ₽` : ` <span style="color:var(--warn)">— одна штука дороже этой части взноса, копи или измени деление</span>`) : ''}</p>`).join('')}
+        ${cp.steps.map(t => `<p style="margin:6px 0">${money(t.amount)} → <b>${
+          t.name ? esc(t.name) : `${clsName[t.cls]}: нужна новая бумага`}</b>${
+          t.lots != null ? (t.lots > 0 ? ` — примерно ${t.lots} шт по ${t.price} ₽` : ` <span style="color:var(--warn)">— одна штука дороже этой части взноса, копи или измени деление</span>`) : ''}${
+          t.blockReason ? `<br><span class="muted">${esc(t.blockReason)}</span>` : ''}</p>`).join('')}
         <p class="muted" style="margin-top:8px">Деление — по степени недобора до целевых долей: класс, отстающий сильнее, получает больше. Внутри класса названа бумага с наибольшей фактической доходностью из уже имеющихся.</p>
       </div>`;
     })()}
@@ -7127,9 +7273,12 @@ function openWhatsNew() {
     ${item('Починено вечное «Считаю…»', 'Девять функций внутри приложения вызывали сами себя без конца: экран висел, память росла. Причина устранена, класс ошибки закрыт проверкой.')}
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
+    ${item('План взноса не спорит с советами', 'Деньги больше не отправляются в бумагу, которую соседняя карточка велит не докупать: учитываются лимит доли (25%) и сектора (35%), а если подходящей бумаги нет — сказано прямо, что нужна новая.')}
+    ${item('Риск считается правильно', 'Волатильность портфеля больше не среднее взвешенное: учитываются связи классов между собой. Смесь колеблется слабее своих частей — в этом и смысл распределения, и теперь оно видно в числах.')}
+    ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 135 автоматических проверок и 93 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 138 автоматических проверок и 99 мутационных, все зелёные.</p>`);
 }
 
 /**
