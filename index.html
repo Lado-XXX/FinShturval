@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30aj</title>
+<title>Штурвал · 2026-07-30ak</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30aj';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ak';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -5647,7 +5647,13 @@ async function mapLimit(items, limit, fn) {
  * и отдаёт отбор. Дивиденды запрашиваются только по коротком списку —
  * двести запросов ради одного экрана недопустимы.
  */
+// На каком шаге сейчас поиск. Нужно, чтобы при отказе по времени сказать
+// не просто «биржа не ответила», а что именно не дождались.
+let marketStage = null;
+const lastMarketStage = () => marketStage;
+
 async function findIdeas(kind, filters = {}) {
+  marketStage = 'ставка денежного рынка';
   const st = await getState();
   const market = await marketContext();
   const ctx = {
@@ -5664,17 +5670,21 @@ async function findIdeas(kind, filters = {}) {
   };
 
   if (kind === 'bonds') {
+    marketStage = 'список облигаций';
     const rows = await moex.fetchAllBonds(filters.type ? [filters.type] : ['gov', 'corp']);
     return { rows: reports.screenBonds(rows, filters, ctx).slice(0, 40), total: rows.length, ctx };
   }
 
+  marketStage = 'список акций';
   const all = await moex.fetchAllStocks();
   // Короткий список: сперва грубые фильтры без выплат, потом — по капитализации,
-  // и только двадцати лидерам считаем дивиденды. Это двадцать запросов, не двести.
+  // и только двенадцати лидерам считаем дивиденды. Двадцать запросов не
+  // укладывались в отведённое время на мобильной сети.
   const rough = reports.screenStocks(all, { ...filters, minYield: 0, minStreak: 0 }, ctx)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0))
-    .slice(0, 20);
-  const histories = await mapLimit(rough, 5, r => moex.fetchDividendHistory(r.ticker));
+    .slice(0, 12);
+  marketStage = 'истории выплат';
+  const histories = await mapLimit(rough, 6, r => moex.fetchDividendHistory(r.ticker));
   rough.forEach((r, i) => {
     const hist = histories[i];
     if (!hist) { r.streak = 0; r.yieldPct = 0; return; }
@@ -5682,6 +5692,7 @@ async function findIdeas(kind, filters = {}) {
     r.yieldPct = reports.trailingYield(hist, r.price);
     r.lastPayout = hist.length ? hist[hist.length - 1] : null;
   });
+  marketStage = null;
   return { rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx };
 }
 
@@ -5692,6 +5703,7 @@ async function findIdeas(kind, filters = {}) {
  * по истории выплат.
  */
 async function findReplacements() {
+  marketStage = 'портфель';
   const st = await getState();
   const owned = st.positions.filter(p => p.qty > 0);
   const facts = [];
@@ -5701,6 +5713,7 @@ async function findReplacements() {
   const myStocks = owned.filter(p => allocationClass(p) === 'stocks');
 
   if (myBonds.length) {
+    marketStage = 'список облигаций';
     const all = await moex.fetchAllBonds(['gov', 'corp']);
     const mine = new Set(myBonds.map(p => p.ticker));
     for (const r of all) {
@@ -5712,11 +5725,13 @@ async function findReplacements() {
   if (myStocks.length) {
     // Свои акции — обязательно; кандидаты — двадцать крупнейших с рынка,
     // иначе это двести запросов истории выплат ради одного экрана.
+    marketStage = 'список акций';
     const all = await moex.fetchAllStocks();
     const mine = new Set(myStocks.map(p => p.ticker));
     const shortlist = all.filter(r => !mine.has(r.ticker))
-      .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 20);
-    const mineHist = await mapLimit(myStocks, 5, p => moex.fetchDividendHistory(p.ticker));
+      .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 12);
+    marketStage = 'истории выплат';
+    const mineHist = await mapLimit(myStocks, 6, p => moex.fetchDividendHistory(p.ticker));
     myStocks.forEach((p, i) => {
       const row = all.find(r => r.ticker === p.ticker);
       const hist = mineHist[i];
@@ -5726,7 +5741,7 @@ async function findReplacements() {
         : { ticker: p.ticker, yieldPct: 0, streak: 0 });
     });
 
-    const candHist = await mapLimit(shortlist, 5, r => moex.fetchDividendHistory(r.ticker));
+    const candHist = await mapLimit(shortlist, 6, r => moex.fetchDividendHistory(r.ticker));
     shortlist.forEach((r, i) => {
       const hist = candHist[i];
       if (!hist) return;      // без истории выплат бумага в кандидаты не годится
@@ -5735,6 +5750,7 @@ async function findReplacements() {
     });
   }
 
+  marketStage = null;
   return { ideas: SH.replacementIdeas(st, candidates, { facts }), checked: candidates.length };
 }
 
@@ -5851,7 +5867,7 @@ async function syncTinvest({ silent = false, force = false } = {}) {
 // buyRecommendations не переэкспортируем: он уже лежит в SH из advisor.js,
 // а обёртка «SH.x = (…) => SH.x(…)» затирала бы оригинал собой — прямой
 // путь в бесконечную рекурсию.
-return {mapLimit, findIdeas, findReplacements, getSecurityDetails,
+return {mapLimit, lastMarketStage, findIdeas, findReplacements, getSecurityDetails,
         syncTinvest, subscribe, getState, addOperation, removeOperation, setAveragePrice, setSetting, applySync, updatePrices, importTrades, resetAll, exportBackup, importBackup, init, explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, crashTest, valueChart, marketContext, rateMeaning};
 })());
 
@@ -6212,10 +6228,17 @@ function viewHome(st) {
           const bonus = Math.min(monthly * 12, 400000) * (Number(st.settings.ndflRate) || 0.13);
           const r = store.ratesFor(st.settings.bondYtm || 0);
           const exp = store.expectedReturn(st.summary.byClass, st.summary.securities, r.rates);
-          const n = whatMovesTheNeedle(g.total, monthly, years, exp, bonus);
+          // Считать рычаги на пять лет, когда цель придёт через год, — вводить
+          // в заблуждение: суммы выходят больше самой цели. Берём тот срок,
+          // который наступит раньше.
+          const horizon = g.reachIn != null && g.reachIn > 0 && g.reachIn < years
+            ? Math.max(1, Math.round(g.reachIn * 10) / 10) : years;
+          const n = whatMovesTheNeedle(g.total, monthly, horizon, exp, bonus);
           if (!n || !n.strongest) return '';
+          const yearWord = h => (h === 1 ? 'год' : h < 5 ? 'года' : 'лет');
           return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
-            <div class="muted" style="margin-bottom:6px">Что сильнее двигает цель — за ${years} ${years === 1 ? 'год' : years < 5 ? 'года' : 'лет'}</div>
+            <div class="muted" style="margin-bottom:6px">Что сильнее двигает цель — за ${horizon} ${yearWord(horizon)}${
+              horizon !== years ? ' (столько осталось при текущем темпе)' : ''}</div>
             ${n.levers.map(l => `<div style="display:flex;justify-content:space-between;padding:4px 0">
               <span class="muted">${esc(l.title)}</span>
               <b class="${l.value >= 0 ? 'up' : 'down'}">${l.value >= 0 ? '+' : '−'}${money(Math.abs(l.value))}</b></div>`).join('')}
@@ -7357,11 +7380,13 @@ async function openPlan() {
       const filters = kind === 'bonds'
         ? { minYTM: Math.max(0.10, rate - 0.01), maxYears: goalYears || 5 }
         : { minYield: 0.06, minStreak: 3 };
-      const res = await withLimit(store.findIdeas(kind, filters), 25, null);
+      const res = await withLimit(store.findIdeas(kind, filters), 45, null);
       if (!box.isConnected && !box.innerHTML) return;      // лист закрыли — молча уходим
       if (!res) {
-        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 25 секунд —
-          поиск по рынку сейчас недоступен. Всё остальное в плане посчитано и работает.</div>`;
+        const stage = store.lastMarketStage();
+        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 45 секунд${
+          stage ? ` — не дождался: ${esc(stage)}` : ''}. Поиск по рынку сейчас недоступен;
+          всё остальное в плане посчитано и работает.</div>`;
         return;
       }
       const st2 = await store.getState();
@@ -7381,10 +7406,11 @@ async function openPlan() {
     const box = $('swapsOut');
     if (!box) return;
     try {
-      const r = await withLimit(store.findReplacements(), 40, null);
+      const r = await withLimit(store.findReplacements(), 60, null);
       if (!r) {
-        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 40 секунд —
-          сравнение с рынком сейчас недоступно.</div>`;
+        const stage = store.lastMarketStage();
+        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 60 секунд${
+          stage ? ` — не дождался: ${esc(stage)}` : ''}. Сравнение с рынком сейчас недоступно.</div>`;
         return;
       }
       box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
@@ -7436,6 +7462,7 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Видно, где застрял поиск', 'Если биржа не отвечает, раздел говорит, чего именно не дождался: списка акций, списка облигаций или историй выплат.')}
     ${item('Поиск по рынку успевает ответить', 'Список кандидатов сокращён до двенадцати крупнейших, запросы идут в шесть потоков, а ожидание поднято до 45 и 60 секунд: на мобильной сети прежних сроков не хватало.')}
     ${item('Ложные расхождения в сверке исчезли', 'Если брокер не отвечает на запрос названия бумаги, приложение берёт имя из запаса, а не подставляет технический код. Диагностика больше не пугает красным «≠» там, где данные целы.')}
     ${item('Сравнения выплат стали честнее', 'Приложение больше не предлагает равняться на бумагу, которую само велит не докупать: сравнение идёт только с бумагами в пределах лимита доли. А выплата выше 20% помечается как почти наверняка разовая.')}
@@ -7448,7 +7475,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 146 автоматических проверок и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 147 автоматических проверок и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
