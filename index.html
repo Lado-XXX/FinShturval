@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30an</title>
+<title>Штурвал · 2026-07-30ao</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30an';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ao';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -2732,6 +2732,46 @@ const COLS = 'SECID,BOARDID,LAST,MARKETPRICE,WAPRICE,LCLOSEPRICE,PREVPRICE';
 /** Различаем причины неудачи: без этого «нет интернета» и «браузер заблокировал» неотличимы. */
 const FAIL = { OFFLINE: 'offline', BLOCKED: 'blocked', TIMEOUT: 'timeout', SERVER: 'server' };
 
+/**
+ * Запасной путь к бирже.
+ *
+ * Браузер запрещает странице читать ответ чужого сайта, если тот не разрешил
+ * это явно. Из адресной строки адрес открывается, а из кода — нет: это и есть
+ * причина, по которой поиск по рынку молчал, хотя биржа доступна.
+ *
+ * Обходится без посредников: биржа умеет отдавать данные как готовый скрипт,
+ * а скрипты со стороннего сайта грузить можно. Никаких третьих лиц в цепочке
+ * не появляется — запрос идёт напрямую на биржу.
+ */
+function fetchJSONP(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const name = `__shturvalIss${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const script = document.createElement('script');
+    let done = false;
+
+    const cleanup = () => {
+      done = true;
+      try { delete window[name]; } catch { window[name] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      cleanup();
+      const e = new Error('биржа не ответила'); e.reason = FAIL.TIMEOUT; reject(e);
+    }, timeoutMs);
+
+    window[name] = data => { if (done) return; clearTimeout(timer); cleanup(); resolve(data); };
+    script.onerror = () => {
+      if (done) return;
+      clearTimeout(timer); cleanup();
+      const e = new Error('биржа недоступна'); e.reason = FAIL.NETWORK; reject(e);
+    };
+
+    script.src = url + (url.includes('?') ? '&' : '?') + `callback=${name}`;
+    document.head.appendChild(script);
+  });
+}
+
 async function fetchJSON(url, timeoutMs = 8000) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     const e = new Error('нет сети'); e.reason = FAIL.OFFLINE; throw e;
@@ -2743,6 +2783,14 @@ async function fetchJSON(url, timeoutMs = 8000) {
     if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.reason = FAIL.SERVER; throw e; }
     return await r.json();
   } catch (err) {
+    // Обычный запрос не прошёл. Если это не наш таймаут, пробуем запасной
+    // путь: очень часто дело в запрете читать чужой ответ, а не в том, что
+    // биржа недоступна.
+    if (err.name !== 'AbortError' && typeof document !== 'undefined'
+        && String(url).startsWith('https://iss.moex.com')) {
+      try { return await fetchJSONP(url, timeoutMs); }
+      catch { /* и запасной путь не помог — расскажем про первую ошибку */ }
+    }
     if (err.reason) throw err;
     if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
     // При открытии файла напрямую (file://) браузер запрещает запросы наружу.
@@ -4789,6 +4837,36 @@ Object.assign(SH, (function(){
 
 const ISS = 'https://iss.moex.com/iss';
 
+/** Запасной путь к бирже — тот же, что в moex.js. */
+function fetchJSONP(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const name = `__shturvalIss${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const script = document.createElement('script');
+    let done = false;
+
+    const cleanup = () => {
+      done = true;
+      try { delete window[name]; } catch { window[name] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      cleanup();
+      const e = new Error('биржа не ответила'); e.reason = FAIL.TIMEOUT; reject(e);
+    }, timeoutMs);
+
+    window[name] = data => { if (done) return; clearTimeout(timer); cleanup(); resolve(data); };
+    script.onerror = () => {
+      if (done) return;
+      clearTimeout(timer); cleanup();
+      const e = new Error('биржа недоступна'); e.reason = FAIL.NETWORK; reject(e);
+    };
+
+    script.src = url + (url.includes('?') ? '&' : '?') + `callback=${name}`;
+    document.head.appendChild(script);
+  });
+}
+
 async function fetchJSON(url, timeoutMs = 8000) {
   // Та же реализация, что в data/moex.js: причина отказа важна не меньше
   // самого отказа. Раньше здесь была упрощённая версия, и одно и то же
@@ -4804,6 +4882,14 @@ async function fetchJSON(url, timeoutMs = 8000) {
     if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.reason = FAIL.SERVER; throw e; }
     return await r.json();
   } catch (err) {
+    // Обычный запрос не прошёл. Если это не наш таймаут, пробуем запасной
+    // путь: очень часто дело в запрете читать чужой ответ, а не в том, что
+    // биржа недоступна.
+    if (err.name !== 'AbortError' && typeof document !== 'undefined'
+        && String(url).startsWith('https://iss.moex.com')) {
+      try { return await fetchJSONP(url, timeoutMs); }
+      catch { /* и запасной путь не помог — расскажем про первую ошибку */ }
+    }
     if (err.reason) throw err;
     if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
     // При открытии файла напрямую (file://) браузер запрещает запросы наружу.
@@ -7266,22 +7352,61 @@ async function openDiagnostics() {
   const probe = $('bProbe');
   if (probe) probe.onclick = async () => {
     const out = $('probeOut');
-    out.innerHTML = '<div class="muted" style="margin:8px 0">Проверяю: три запроса от самого маленького к тяжёлому…</div>';
-    const rows = await withLimit(store.probeExchange(), 45, null);
-    if (!rows) { out.innerHTML = '<div class="muted" style="margin:8px 0">Проверка не завершилась за 45 секунд.</div>'; return; }
-    out.innerHTML = `<div style="margin:8px 0">${rows.map(r => `
-      <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
-        <span class="muted" style="flex:1">${esc(r.name)}</span>
-        <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
-          r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
-      </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
-      <div class="muted" style="margin-top:8px;line-height:1.6">${
-        rows.every(r => r.ok)
-          ? 'Биржа доступна полностью — если разделы рынка всё равно пусты, покажи этот экран разработчику.'
-          : rows[0].ok
-            ? 'Мелкий запрос проходит, крупный — нет: похоже на ограничение по объёму или времени в сети оператора.'
-            : 'Не проходит даже крошечный запрос: доступ к бирже закрыт целиком — VPN, оператор или сбой самой биржи.'}</div>
-    </div>`;
+    if (!out) return;
+    probe.disabled = true;
+
+    // Каждый шаг со своим секундомером и своей защитой: если один запрос
+    // повиснет, остальные всё равно отработают, а человек увидит частичный
+    // итог сразу, а не будет смотреть в «проверяю…» две минуты.
+    const cases = [
+      ['крошечный запрос (индекс)',
+       'https://iss.moex.com/iss/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID', 8000],
+      ['страница акций (100 строк)',
+       'https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=securities&securities.columns=SECID&start=0', 15000],
+      ['история выплат одной бумаги',
+       'https://iss.moex.com/iss/securities/SBER/dividends.json?iss.meta=off', 10000]
+    ];
+
+    const rows = [];
+    const draw = (note) => {
+      out.innerHTML = `<div style="margin:8px 0">${rows.map(r => `
+        <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
+          <span class="muted" style="flex:1">${esc(r.name)}</span>
+          <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
+            r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
+        </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
+        ${note ? `<div class="muted" style="margin-top:8px;line-height:1.6">${esc(note)}</div>` : ''}</div>`;
+    };
+
+    for (const [name, url, ms] of cases) {
+      rows.push({ name, ok: false, ms: 0, error: 'идёт запрос…' });
+      draw('Проверяю…');
+      const started = Date.now();
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), ms);
+        const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`биржа ответила кодом ${res.status}`);
+        await res.json();
+        rows[rows.length - 1] = { name, ok: true, ms: Date.now() - started };
+      } catch (err) {
+        const msg = err && err.name === 'AbortError'
+          ? `не ответила за ${(ms / 1000).toFixed(0)} с`
+          : (err && err.message ? err.message : String(err));
+        rows[rows.length - 1] = { name, ok: false, ms: Date.now() - started, error: msg };
+      }
+      draw('Проверяю…');
+    }
+
+    const allOk = rows.every(r => r.ok);
+    draw(allOk
+      ? 'Биржа доступна полностью. Если разделы рынка всё равно пусты — покажи этот экран разработчику.'
+      : rows[0].ok
+        ? 'Мелкий запрос проходит, крупный — нет: ограничение по объёму или времени в сети.'
+        : 'Не проходит даже крошечный запрос: доступ к бирже закрыт целиком — сеть оператора, VPN или сбой самой биржи. '
+          + 'Проверь тем же адресом в браузере: iss.moex.com/iss/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json');
+    probe.disabled = false;
   };
 
   $('bDiagSync').onclick = async () => {
@@ -7569,6 +7694,7 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Биржа заработала: запасной путь', 'Браузер не давал странице читать ответ Мосбиржи — из адресной строки адрес открывался, а из кода нет. Теперь данные грузятся вторым способом, напрямую с биржи и без посредников.')}
     ${item('Честно про недоступную биржу', 'Если Мосбиржа не отвечает (чаще всего её режет VPN), приложение выясняет это за пять секунд и говорит прямо, а «Рынок сегодня» помечает, что цифры старые, вместо того чтобы выдавать вчерашние за сегодняшние.')}
     ${item('Списки биржи — страницами', 'Поиск падал на самом списке бумаг: один ответ на сотни строк не доходил по мобильной сети. Теперь страницы по сотне, а корпоративные облигации (тысячи выпусков) по умолчанию не тянутся вовсе.')}
     ${item('Видно, где застрял поиск', 'Если биржа не отвечает, раздел говорит, чего именно не дождался: списка акций, списка облигаций или историй выплат.')}
@@ -7584,7 +7710,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 149 автоматических проверок и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 150 автоматических проверок и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
