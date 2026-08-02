@@ -4,7 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0e14">
-<title>Штурвал · 2026-07-30ab</title>
+
+<!-- Установка на домашний экран. Манифест и метки iOS нужны, чтобы система
+     показала приложение своим: без адресной строки, с иконкой и названием.
+     Пути относительные — приложение живёт в подпапке репозитория. -->
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Штурвал">
+<meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
+<title>Штурвал · 2026-07-30ac</title>
 
 <style>
 :root{
@@ -134,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30ab';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ac';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
