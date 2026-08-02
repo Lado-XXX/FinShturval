@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30al</title>
+<title>Штурвал · 2026-07-30am</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30al';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30am';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -2894,6 +2894,20 @@ async function fetchMarketPulse() {
 }
 
 /**
+ * Жива ли биржа с этого устройства. Крошечный запрос с коротким сроком:
+ * если он не проходит, дело не в объёме данных, а в самом доступе — чаще
+ * всего его режет VPN. Лучше сказать это за пять секунд, чем заставлять
+ * ждать минуту и выдавать туманное «не ответила».
+ */
+async function pingExchange(timeout = 5000) {
+  try {
+    const j = await fetchJSON(`${ISS}/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json`
+      + `?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID`, timeout);
+    return !!(j && j.marketdata);
+  } catch { return false; }
+}
+
+/**
  * История индекса с даты. MCFTR — индекс ПОЛНОЙ доходности (с дивидендами):
  * только с ним сравнение с портфелем честно — портфель ведь получает выплаты.
  * Страницы истории листаются с потолком, чтобы не зависнуть на длинной истории.
@@ -3025,7 +3039,7 @@ async function fetchDividendHistory(ticker) {
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
-return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory,
+return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange,
         fetchAllStocks, fetchAllBonds, fetchDividendHistory};
 })());
 
@@ -5101,15 +5115,20 @@ async function valueChart(days = 90) {
  */
 async function marketContext() {
   const cached = await db.getMeta('market');
-  if (cached && cached.date === today()) return cached.data;
+  if (cached && cached.date === today()) return { ...cached.data, at: cached.at || null, stale: false };
 
   try {
     const pulse = await fetchMarketPulse();
+    const at = Date.now();
     const data = { ...pulse, date: today() };
-    await db.setMeta('market', { date: today(), data });
-    return data;
+    await db.setMeta('market', { date: today(), at, data });
+    return { ...data, at, stale: false };
   } catch {
-    return cached?.data || { imoex: null, moneyRate: null, unavailable: true };
+    // Биржа не ответила. Отдаём последнее известное, но ПОМЕЧАЕМ возрастом:
+    // иначе вчерашний индекс выглядит как сегодняшний, и это обман.
+    return cached
+      ? { ...cached.data, at: cached.at || null, stale: true }
+      : { imoex: null, moneyRate: null, unavailable: true, stale: true };
   }
 }
 
@@ -5675,6 +5694,8 @@ let marketStage = null;
 const lastMarketStage = () => marketStage;
 
 async function findIdeas(kind, filters = {}) {
+  marketStage = 'связь с биржей';
+  if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
   marketStage = 'ставка денежного рынка';
   const st = await getState();
   const market = await marketContext();
@@ -5725,6 +5746,8 @@ async function findIdeas(kind, filters = {}) {
  * по истории выплат.
  */
 async function findReplacements() {
+  marketStage = 'связь с биржей';
+  if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
   marketStage = 'портфель';
   const st = await getState();
   const owned = st.positions.filter(p => p.qty > 0);
@@ -6849,6 +6872,8 @@ async function drawMarket() {
     card.style.display = 'block';
     box.innerHTML = `
       <div style="display:flex;gap:18px;margin-bottom:${meaning ? '12px' : '0'}">
+        ${m.stale ? `<div class="muted" style="font-size:11px;width:100%;margin-bottom:6px">${
+          m.at ? `данные от ${new Date(m.at).toLocaleString('ru-RU').slice(0, 17)} — ` : ''}биржа сейчас недоступна</div>` : ''}
         ${m.imoex ? `<div><div class="muted" style="font-size:11px">Индекс Мосбиржи</div>
           <div style="font-size:20px;font-weight:750">${Math.round(m.imoex).toLocaleString('ru-RU')}</div>
           ${m.monthChange != null ? `<div style="font-size:12px;font-weight:650" class="${m.monthChange >= 0 ? 'up' : 'down'}">${m.monthChange >= 0 ? '+' : '−'}${Math.abs(m.monthChange * 100).toFixed(1)}% за месяц</div>` : ''}</div>` : ''}
@@ -7406,9 +7431,13 @@ async function openPlan() {
       if (!box.isConnected && !box.innerHTML) return;      // лист закрыли — молча уходим
       if (!res) {
         const stage = store.lastMarketStage();
-        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 45 секунд${
-          stage ? ` — не дождался: ${esc(stage)}` : ''}. Поиск по рынку сейчас недоступен;
-          всё остальное в плане посчитано и работает.</div>`;
+        box.innerHTML = stage === 'нет доступа к бирже'
+          ? `<div class="muted" style="line-height:1.6">Мосбиржа недоступна с этого устройства.
+              Чаще всего её режет VPN — выключи его и обнови страницу. Данные брокера идут другим путём,
+              поэтому портфель и советы работают, а поиск по рынку — нет.</div>`
+          : `<div class="muted" style="line-height:1.6">Биржа не ответила за 45 секунд${
+              stage ? ` — не дождался: ${esc(stage)}` : ''}. Поиск по рынку сейчас недоступен;
+              всё остальное в плане посчитано и работает.</div>`;
         return;
       }
       const st2 = await store.getState();
@@ -7431,8 +7460,11 @@ async function openPlan() {
       const r = await withLimit(store.findReplacements(), 60, null);
       if (!r) {
         const stage = store.lastMarketStage();
-        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 60 секунд${
-          stage ? ` — не дождался: ${esc(stage)}` : ''}. Сравнение с рынком сейчас недоступно.</div>`;
+        box.innerHTML = stage === 'нет доступа к бирже'
+          ? `<div class="muted" style="line-height:1.6">Мосбиржа недоступна с этого устройства —
+              скорее всего, из-за VPN. Сравнение с рынком появится, как только биржа станет доступна.</div>`
+          : `<div class="muted" style="line-height:1.6">Биржа не ответила за 60 секунд${
+              stage ? ` — не дождался: ${esc(stage)}` : ''}. Сравнение с рынком сейчас недоступно.</div>`;
         return;
       }
       box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
@@ -7484,6 +7516,7 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Честно про недоступную биржу', 'Если Мосбиржа не отвечает (чаще всего её режет VPN), приложение выясняет это за пять секунд и говорит прямо, а «Рынок сегодня» помечает, что цифры старые, вместо того чтобы выдавать вчерашние за сегодняшние.')}
     ${item('Списки биржи — страницами', 'Поиск падал на самом списке бумаг: один ответ на сотни строк не доходил по мобильной сети. Теперь страницы по сотне, а корпоративные облигации (тысячи выпусков) по умолчанию не тянутся вовсе.')}
     ${item('Видно, где застрял поиск', 'Если биржа не отвечает, раздел говорит, чего именно не дождался: списка акций, списка облигаций или историй выплат.')}
     ${item('Поиск по рынку успевает ответить', 'Список кандидатов сокращён до двенадцати крупнейших, запросы идут в шесть потоков, а ожидание поднято до 45 и 60 секунд: на мобильной сети прежних сроков не хватало.')}
@@ -7498,7 +7531,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 148 автоматических проверок и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 149 автоматических проверок и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
