@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30ah</title>
+<title>Штурвал · 2026-07-30ai</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30ah';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ai';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -4061,26 +4061,56 @@ async function tiOperations(token, accountId, from = '2000-01-01') {
 }
 
 /** Портфель и остаток по версии брокера — для сверки того, что мы насчитали. */
-async function tiPortfolio(token, accountId) {
+/**
+ * Портфель у брокера.
+ *
+ * `known` — ранее выясненные имена бумаг: uid → {ticker, name}. Нужны потому,
+ * что запрос названия может не ответить (сеть, лимит запросов), и тогда без
+ * запаса пришлось бы выдать технический код брокера за тикер. Так рождались
+ * ложные расхождения в сверке («GOLD 2533 ≠ 0» рядом с «TCSM… 0 ≠ 2533»)
+ * и, что хуже, цены могли записаться под чужим именем.
+ *
+ * Возвращает `resolved` — то, что удалось выяснить: вызывающий сохранит это
+ * и в следующий раз обойдётся без запроса.
+ */
+async function tiPortfolio(token, accountId, known = {}) {
   const cache = new Map();
   const data = await tiCall(token, 'OperationsService', 'GetPortfolio', { accountId });
   const rows = [], prices = [];
-  let cash = 0;
+  const resolved = {};
+  let cash = 0, unresolved = 0;
 
   for (const p of (data.positions || [])) {
     const qty = tiAmount(p.quantity);
     if (p.instrumentType === 'currency') { cash += qty; continue; }
     if (!(qty > 0)) continue;
-    const sec = await tiInstrument(token, p.instrumentUid, cache);
-    const ticker = sec && sec.ticker ? sec.ticker : (p.figi || '').toUpperCase();
+
+    let sec = null;
+    try { sec = await tiInstrument(token, p.instrumentUid, cache); } catch { sec = null; }
+
+    const remembered = known[p.instrumentUid];
+    let ticker, name;
+    if (sec && sec.ticker) {
+      ticker = sec.ticker; name = sec.name || sec.ticker;
+      resolved[p.instrumentUid] = { ticker, name };
+    } else if (remembered && remembered.ticker) {
+      // Имя не ответило — берём выясненное раньше. Это факт, а не догадка.
+      ticker = remembered.ticker; name = remembered.name || ticker;
+    } else {
+      ticker = (p.figi || p.instrumentUid || '').toUpperCase();
+      name = ticker;
+      unresolved += 1;
+    }
+
     const price = tiAmount(p.currentPrice) + tiAmount(p.currentNkd);
-    rows.push({ ticker, name: sec ? sec.name : ticker, qty, price: roundPrice(price),
-                uid: p.instrumentUid, kind: p.instrumentType });
+    rows.push({ ticker, name, qty, price: roundPrice(price),
+                uid: p.instrumentUid, kind: p.instrumentType,
+                unresolved: !(sec && sec.ticker) && !(remembered && remembered.ticker) });
     if (price > 0) prices.push({ ticker, price: roundPrice(price) });
   }
 
   if (!cash) cash = tiAmount(data.totalAmountCurrencies);
-  return { rows, prices, cash: Math.round(cash * 100) / 100 };
+  return { rows, prices, cash: Math.round(cash * 100) / 100, resolved, unresolved };
 }
 
 /**
@@ -5745,7 +5775,10 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   let ops, book;
   try {
     ops = await tiOperations(token, accountId);
-    book = await tiPortfolio(token, accountId);
+    book = await tiPortfolio(token, accountId, (await db.getMeta('uidTickers')) || {});
+    if (book && book.resolved && Object.keys(book.resolved).length) {
+      await db.setMeta('uidTickers', { ...((await db.getMeta('uidTickers')) || {}), ...book.resolved });
+    }
   } catch (err) {
     await db.setMeta('tiLastError', { at: Date.now(), message: err.message || String(err) });
     throw err;
@@ -7051,7 +7084,14 @@ async function openDiagnostics() {
   const mine = st.positions.filter(p => p.qty > 0);
   let broker = null, brokerError = null;
   if (token && account) {
-    try { broker = await withLimit(tiPortfolio(token, account), 12, null); }
+    try {
+      const known = (await store.getMeta('uidTickers')) || {};
+      broker = await withLimit(tiPortfolio(token, account, known), 12, null);
+      if (broker && broker.resolved && Object.keys(broker.resolved).length) {
+        await store.setMeta('uidTickers',
+          { ...((await store.getMeta('uidTickers')) || {}), ...broker.resolved });
+      }
+    }
     catch (err) { brokerError = err.message; }
   }
 
@@ -7066,6 +7106,10 @@ async function openDiagnostics() {
   if (broker) {
     const theirs = new Map(broker.rows.map(r => [r.ticker, r.qty]));
     const all = new Set([...mine.map(p => p.ticker), ...theirs.keys()]);
+    // Бумага, чьё имя брокер не назвал, попадает в список под техническим
+    // кодом. Это не расхождение данных, а неотвеченный запрос — и говорить
+    // о нём надо словами, а не пугать красным «≠».
+    const unnamed = broker.rows.filter(r => r.unresolved).length;
     compare = [...all].sort().map(t => {
       const a = mine.find(p => p.ticker === t)?.qty ?? 0;
       const b = theirs.get(t) ?? 0;
@@ -7076,7 +7120,11 @@ async function openDiagnostics() {
     }).join('') + `<div style="display:flex;justify-content:space-between;padding:7px 0;
       border-top:1px solid var(--line);font-size:12.5px;
       color:${Math.abs(st.summary.cash - broker.cash) < 1 ? 'var(--dim)' : 'var(--danger)'}">
-      <span>свободные деньги</span><span>${money(st.summary.cash)} / ${money(broker.cash)}</span></div>`;
+      <span>свободные деньги</span><span>${money(st.summary.cash)} / ${money(broker.cash)}</span></div>`
+      + (unnamed ? `<div class="muted" style="margin-top:10px;line-height:1.6">
+          Названия ${unnamed} ${unnamed === 1 ? 'бумаги' : 'бумаг'} брокер сейчас не отдал — они показаны
+          техническим кодом, и строки выглядят как расхождение. Данные целы: обнови из Т-Инвестиций
+          ещё раз, имена подставятся из запаса.</div>` : '');
   }
 
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Диагностика</h2>
@@ -7159,7 +7207,8 @@ async function portfolioFacts() {
   const token = await store.getMeta('tiToken');
   const account = await store.getMeta('tiAccount');
   if (token && account) {
-    const book = await withLimit(store.tiPortfolio(token, account), 12, null);
+    const known = (await store.getMeta('uidTickers')) || {};
+    const book = await withLimit(store.tiPortfolio(token, account, known), 12, null);
     if (book) {
       const facts = await withLimit(store.tiFacts(token, book.rows), 25, null);
       if (facts && facts.rows.length) { await rememberBondYtm(facts); return facts; }
@@ -7381,6 +7430,7 @@ function openWhatsNew() {
     ${item('Починено вечное «Считаю…»', 'Девять функций внутри приложения вызывали сами себя без конца: экран висел, память росла. Причина устранена, класс ошибки закрыт проверкой.')}
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
+    ${item('Ложные расхождения в сверке исчезли', 'Если брокер не отвечает на запрос названия бумаги, приложение берёт имя из запаса, а не подставляет технический код. Диагностика больше не пугает красным «≠» там, где данные целы.')}
     ${item('Сравнения выплат стали честнее', 'Приложение больше не предлагает равняться на бумагу, которую само велит не докупать: сравнение идёт только с бумагами в пределах лимита доли. А выплата выше 20% помечается как почти наверняка разовая.')}
     ${item('План считает лотами', 'На бирже покупают лотами: у Сбера и МТС в лоте 10 акций. План больше не советует «111 шт» — он называет целые лоты и остаток, который не потратится.')}
     ${item('Рынок — сам, без кнопок', 'В «Что стоит сделать» появились разделы «Что можно купить на рынке» и «Что можно поменять»: приложение ищет по всей Мосбирже само, пока ты читаешь план. Нажимать ничего не нужно.')}
@@ -7391,7 +7441,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 144 автоматические проверки и 106 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 145 автоматических проверок и 107 мутационных, все зелёные.</p>`);
 }
 
 /**
