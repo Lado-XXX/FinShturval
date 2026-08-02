@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30am</title>
+<title>Штурвал · 2026-07-30an</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30am';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30an';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -2894,6 +2894,35 @@ async function fetchMarketPulse() {
 }
 
 /**
+ * Проверка доступа к бирже по шагам: от самого маленького запроса к самым
+ * тяжёлым. Показывает время и текст ошибки для каждого — без этого нельзя
+ * отличить «сеть режет биржу» от «ответ слишком большой» и от «браузер не
+ * пускает по правилам обмена между сайтами».
+ */
+async function probeExchange() {
+  const cases = [
+    ['крошечный запрос (индекс)',
+     `${ISS}/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID`, 8000],
+    ['одна страница акций (100 строк)',
+     `${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=securities&securities.columns=SECID&start=0`, 15000],
+    ['история выплат одной бумаги',
+     `${ISS}/securities/SBER/dividends.json?iss.meta=off`, 10000]
+  ];
+  const out = [];
+  for (const [name, url, timeout] of cases) {
+    const started = Date.now();
+    try {
+      await fetchJSON(url, timeout);
+      out.push({ name, ok: true, ms: Date.now() - started });
+    } catch (err) {
+      out.push({ name, ok: false, ms: Date.now() - started,
+                 error: (err && err.message) ? err.message : String(err) });
+    }
+  }
+  return out;
+}
+
+/**
  * Жива ли биржа с этого устройства. Крошечный запрос с коротким сроком:
  * если он не проходит, дело не в объёме данных, а в самом доступе — чаще
  * всего его режет VPN. Лучше сказать это за пять секунд, чем заставлять
@@ -3039,7 +3068,7 @@ async function fetchDividendHistory(ticker) {
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
-return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange,
+return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
         fetchAllStocks, fetchAllBonds, fetchDividendHistory};
 })());
 
@@ -5912,7 +5941,8 @@ async function syncTinvest({ silent = false, force = false } = {}) {
 // buyRecommendations не переэкспортируем: он уже лежит в SH из advisor.js,
 // а обёртка «SH.x = (…) => SH.x(…)» затирала бы оригинал собой — прямой
 // путь в бесконечную рекурсию.
-return {mapLimit, lastMarketStage, findIdeas, findReplacements, getSecurityDetails,
+return {mapLimit, lastMarketStage, probeExchange: (...a) => moex.probeExchange(...a),
+        findIdeas, findReplacements, getSecurityDetails,
         syncTinvest, subscribe, getState, addOperation, removeOperation, setAveragePrice, setSetting, applySync, updatePrices, importTrades, resetAll, exportBackup, importBackup, init, explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, crashTest, valueChart, marketContext, rateMeaning};
 })());
 
@@ -7228,8 +7258,31 @@ async function openDiagnostics() {
     ${compare}
 
     <div style="height:16px"></div>
+    <button class="btn ghost wide" id="bProbe" style="margin-bottom:10px">Проверить доступ к бирже</button>
+    <div id="probeOut"></div>
     <button class="btn wide" id="bDiagSync">Собрать журнал заново</button>
     <div id="bDiagOut"></div>`);
+
+  const probe = $('bProbe');
+  if (probe) probe.onclick = async () => {
+    const out = $('probeOut');
+    out.innerHTML = '<div class="muted" style="margin:8px 0">Проверяю: три запроса от самого маленького к тяжёлому…</div>';
+    const rows = await withLimit(store.probeExchange(), 45, null);
+    if (!rows) { out.innerHTML = '<div class="muted" style="margin:8px 0">Проверка не завершилась за 45 секунд.</div>'; return; }
+    out.innerHTML = `<div style="margin:8px 0">${rows.map(r => `
+      <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
+        <span class="muted" style="flex:1">${esc(r.name)}</span>
+        <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
+          r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
+      </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
+      <div class="muted" style="margin-top:8px;line-height:1.6">${
+        rows.every(r => r.ok)
+          ? 'Биржа доступна полностью — если разделы рынка всё равно пусты, покажи этот экран разработчику.'
+          : rows[0].ok
+            ? 'Мелкий запрос проходит, крупный — нет: похоже на ограничение по объёму или времени в сети оператора.'
+            : 'Не проходит даже крошечный запрос: доступ к бирже закрыт целиком — VPN, оператор или сбой самой биржи.'}</div>
+    </div>`;
+  };
 
   $('bDiagSync').onclick = async () => {
     $('bDiagOut').innerHTML = '<div class="muted" style="margin-top:12px">Забираю историю…</div>';
