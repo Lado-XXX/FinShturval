@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30ac</title>
+<title>Штурвал · 2026-07-30ah</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30ac';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ah';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -636,6 +636,34 @@ function incomeReceived(ops, sinceDate) {
     .reduce((s, o) => s + o.amount, 0);
 }
 
+/**
+ * Настоящий результат позиции: цена ПЛЮС полученные по ней выплаты.
+ *
+ * Считать только по цене — обманывать себя, особенно на дивидендных бумагах:
+ * в день отсечки цена падает примерно на размер дивиденда, и человек видит
+ * минус там, где деньги уже пришли на счёт. Выплаты берутся из журнала, то
+ * есть это факт, а не оценка.
+ */
+function positionResult(ops, position) {
+  if (!position) return null;
+  const value = positionValue(position);
+  const cost = positionCost(position);
+  const paid = (ops || [])
+    .filter(o => o.type === OP.DIVIDEND && o.ticker === position.ticker)
+    .reduce((sum, o) => sum + o.amount, 0);
+
+  const priceDelta = value - cost;
+  const total = priceDelta + paid;
+  return {
+    value, cost, paid,
+    priceDelta, pricePct: cost > 0 ? priceDelta / cost : 0,
+    total, totalPct: cost > 0 ? total / cost : 0,
+    // Выплаты вытянули позицию из минуса — это стоит сказать словами,
+    // потому что на экране цена всё ещё красная.
+    rescued: priceDelta < 0 && total >= 0
+  };
+}
+
 /** Проверка: можно ли выполнить операцию. Возвращает описание проблемы или null. */
 function validate(op, positions, cash) {
   if (!op) return 'Не понял операцию';
@@ -663,7 +691,7 @@ function validate(op, positions, cash) {
   return null;
 }
 
-return {OP, makeOp, normalizeDate, rebuildPositions, rebuildCash, rebuildReserve, cashFlows, yearContributions, incomeReceived, periodReport, payoutsByMonth, benchmarkCompare, timeWeightedReturn, validate};
+return {OP, makeOp, normalizeDate, rebuildPositions, rebuildCash, rebuildReserve, cashFlows, yearContributions, incomeReceived, periodReport, payoutsByMonth, benchmarkCompare, timeWeightedReturn, positionResult, validate};
 })());
 
 /* ─── core/portfolio.js ─── */
@@ -907,7 +935,13 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
     .filter(x => allocationClass(x.p) === 'stocks' && x.row && x.row.yieldPct != null);
   if (payers.length >= 2) {
     const ranked = [...payers].sort((a, b) => (b.row.yieldPct || 0) - (a.row.yieldPct || 0));
-    const top = ranked[0], last = ranked[ranked.length - 1];
+    // С чем сравнивать: только с бумагой, которую действительно имеет смысл
+    // держать больше. Бумага за лимитом доли отпадает — иначе приложение
+    // предлагало бы наращивать то, что соседняя карточка велит не наращивать.
+    const eligible = ranked.filter(x =>
+      s.securities > 0 && positionValue(x.p) / s.securities <= LIMITS.singlePosition);
+    const top = eligible[0], last = ranked[ranked.length - 1];
+    if (top && last && top.p.ticker !== last.p.ticker) {
     const lastValue = positionValue(last.p);
     const gapPct = (top.row.yieldPct || 0) - (last.row.yieldPct || 0);
     const gapMoney = lastValue * gapPct * 0.87;
@@ -926,7 +960,11 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
         note: `Если бумага бралась ради роста цены, а не выплат — низкий дивиденд не изъян. `
           + `Перекладка — это комиссия и превращение бумажного результата в настоящий. `
           + `И высокие выплаты ${top.p.name} — решение компании, его могут урезать в любой год.`
+          + ((top.row.yieldPct || 0) > 0.20
+            ? ` Выплата больше 20% почти всегда разовая: обычно это особый дивиденд, который в следующем году не повторится.`
+            : '')
       });
+    }
     }
   }
 
@@ -1356,10 +1394,19 @@ function contributionPlan(state, flow = { rows: [] }, amountOpt = null) {
 
     const pick = allowed[0] || fallback[0] || null;
     const blocked = !pick && byYield.length > 0;
-    const lots = pick && pick.price > 0 ? Math.floor(part.sum / pick.price) : null;
+
+    // Покупают лотами: у Сбера в лоте 10 акций, и «111 штук» купить нельзя.
+    // Считаем целые лоты и честно показываем остаток, который не потратится.
+    const lotSize = pick ? (Number(state.settings?.lots?.[pick.ticker]) || 1) : 1;
+    const lotPrice = pick && pick.price > 0 ? pick.price * lotSize : 0;
+    const wholeLots = lotPrice > 0 ? Math.floor(part.sum / lotPrice) : null;
+    const lots = wholeLots != null ? wholeLots * lotSize : null;   // штук всего
+    const spent = wholeLots != null ? wholeLots * lotPrice : 0;
+
     return { cls: part.cls, amount: Math.round(part.sum),
              ticker: pick ? pick.ticker : null, name: pick ? pick.name : null,
              price: pick ? pick.price : null, lots,
+             lotSize, wholeLots, leftover: pick ? Math.round(part.sum - spent) : 0,
              // Причина молчания важнее молчания: человек должен понимать,
              // почему бумага не названа.
              blocked, blockReason: blocked
@@ -2732,7 +2779,7 @@ function pickPrice(row, boardId) {
 async function fetchOne(secId, engine, market) {
   const url = `${ISS}/engines/${engine}/markets/${market}/securities/${encodeURIComponent(secId)}.json`
             + `?iss.meta=off&iss.only=marketdata,securities&marketdata.columns=${COLS}`
-            + `&securities.columns=BOARDID,ACCRUEDINT,FACEVALUE,LOTVALUE`;
+            + `&securities.columns=BOARDID,ACCRUEDINT,FACEVALUE,LOTVALUE,LOTSIZE`;
 
   const j = await fetchJSON(url);
   const mdRows = j?.marketdata?.data || [];
@@ -2740,7 +2787,9 @@ async function fetchOne(secId, engine, market) {
 
   // накопленный купон и номинал по площадке
   const secByBoard = {};
-  for (const r of secRows) secByBoard[r[0]] = { accrued: r[1], face: r[2] };
+  // Размер лота: на бирже покупают лотами, а не штуками. Сбер торгуется
+  // по 10 акций в лоте — совет «купи 111 штук» исполнить невозможно.
+  for (const r of secRows) secByBoard[r[0]] = { accrued: r[1], face: r[2], lot: r[4] };
 
   for (const row of mdRows) {
     const board = row[1];
@@ -2753,9 +2802,11 @@ async function fetchOne(secId, engine, market) {
       const face = info.face > 0 ? info.face : 1000;
       const accrued = Number(info.accrued) || 0;
       // цена в процентах номинала → рубли, плюс накопленный купон (как показывает брокер)
-      return { price: roundPrice(raw / 100 * face + accrued), accrued, board };
+      return { price: roundPrice(raw / 100 * face + accrued), accrued, board,
+               lot: Number(info.lot) > 0 ? Number(info.lot) : 1 };
     }
-    return { price: roundPrice(raw), accrued: 0, board };
+    const lot = Number((secByBoard[board] || {}).lot) || 1;
+    return { price: roundPrice(raw), accrued: 0, board, lot };
   }
   return null;
 }
@@ -2779,7 +2830,8 @@ async function fetchPrices(assets) {
     }
 
     if (result) {
-      updated.push({ ticker: asset.ticker, price: result.price, accrued: result.accrued });
+      updated.push({ ticker: asset.ticker, price: result.price, accrued: result.accrued,
+                     lot: result.lot || 1 });
     } else {
       failed.push(asset.ticker);
     }
@@ -5112,6 +5164,7 @@ async function getState() {
     bondYtm: (meta.bondYtm && meta.bondYtm.value > 0
       && daysBetween(meta.bondYtm.date, today()) <= 31) ? meta.bondYtm.value : null,
     prices: meta.prices || {},          // последние известные цены
+    lots: meta.lots || {},              // размеры лотов: покупают лотами, не штуками
     lastPriceUpdate: meta.lastPriceUpdate || null,
     lastSync: meta.lastSync || null,
     tiConnected: !!meta.tiToken && !!meta.tiAccount,
@@ -5343,9 +5396,14 @@ async function applySync(changes, brokerCash) {
 async function updatePrices(updates) {
   const st = await getState();
   const prices = { ...st.settings.prices };
-  for (const u of updates) prices[u.ticker] = u.price;
+  const lots = { ...(st.settings.lots || {}) };
+  for (const u of updates) {
+    prices[u.ticker] = u.price;
+    if (Number(u.lot) > 0) lots[u.ticker] = Number(u.lot);
+  }
 
   await db.setMeta('prices', prices);
+  await db.setMeta('lots', lots);
   await db.setMeta('lastPriceUpdate', Date.now());
 
   // снимок стоимости на сегодня — для графика
@@ -5530,6 +5588,26 @@ const analyzeBuy = async (t, a) => R.analyzeBuy(await getState(), t, a);
 const portfolioGaps = async () => R.portfolioGaps(await getState());
 
 /**
+ * Параллельная загрузка с ограничением. Двадцать запросов по очереди на
+ * мобильной сети — это полминуты и почти гарантированный отказ по времени;
+ * пять одновременно укладываются в секунды. Ошибка одной бумаги не рушит
+ * остальные: у неё просто не будет выплат.
+ */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      try { out[i] = await fn(items[i], i); } catch { out[i] = null; }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
  * Поиск идей: тянет список бумаг с биржи, обогащает фактическими выплатами
  * и отдаёт отбор. Дивиденды запрашиваются только по коротком списку —
  * двести запросов ради одного экрана недопустимы.
@@ -5561,14 +5639,14 @@ async function findIdeas(kind, filters = {}) {
   const rough = reports.screenStocks(all, { ...filters, minYield: 0, minStreak: 0 }, ctx)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0))
     .slice(0, 20);
-  for (const r of rough) {
-    try {
-      const hist = await moex.fetchDividendHistory(r.ticker);
-      r.streak = reports.payoutStreak(hist);
-      r.yieldPct = reports.trailingYield(hist, r.price);
-      r.lastPayout = hist.length ? hist[hist.length - 1] : null;
-    } catch { r.streak = 0; r.yieldPct = 0; }
-  }
+  const histories = await mapLimit(rough, 5, r => moex.fetchDividendHistory(r.ticker));
+  rough.forEach((r, i) => {
+    const hist = histories[i];
+    if (!hist) { r.streak = 0; r.yieldPct = 0; return; }
+    r.streak = reports.payoutStreak(hist);
+    r.yieldPct = reports.trailingYield(hist, r.price);
+    r.lastPayout = hist.length ? hist[hist.length - 1] : null;
+  });
   return { rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx };
 }
 
@@ -5603,21 +5681,23 @@ async function findReplacements() {
     const mine = new Set(myStocks.map(p => p.ticker));
     const shortlist = all.filter(r => !mine.has(r.ticker))
       .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 20);
-    for (const p of myStocks) {
+    const mineHist = await mapLimit(myStocks, 5, p => moex.fetchDividendHistory(p.ticker));
+    myStocks.forEach((p, i) => {
       const row = all.find(r => r.ticker === p.ticker);
-      try {
-        const hist = await moex.fetchDividendHistory(p.ticker);
-        facts.push({ ticker: p.ticker, yieldPct: R2.trailingYield(hist, (row && row.price) || p.price),
-                     streak: R2.payoutStreak(hist) });
-      } catch { facts.push({ ticker: p.ticker, yieldPct: 0, streak: 0 }); }
-    }
-    for (const r of shortlist) {
-      try {
-        const hist = await moex.fetchDividendHistory(r.ticker);
-        candidates.push({ ...r, kind: 'stock', yieldPct: R2.trailingYield(hist, r.price),
-                          streak: R2.payoutStreak(hist) });
-      } catch { /* без истории выплат бумага в кандидаты не годится */ }
-    }
+      const hist = mineHist[i];
+      facts.push(hist
+        ? { ticker: p.ticker, yieldPct: R2.trailingYield(hist, (row && row.price) || p.price),
+            streak: R2.payoutStreak(hist) }
+        : { ticker: p.ticker, yieldPct: 0, streak: 0 });
+    });
+
+    const candHist = await mapLimit(shortlist, 5, r => moex.fetchDividendHistory(r.ticker));
+    shortlist.forEach((r, i) => {
+      const hist = candHist[i];
+      if (!hist) return;      // без истории выплат бумага в кандидаты не годится
+      candidates.push({ ...r, kind: 'stock', yieldPct: R2.trailingYield(hist, r.price),
+                        streak: R2.payoutStreak(hist) });
+    });
   }
 
   return { ideas: SH.replacementIdeas(st, candidates, { facts }), checked: candidates.length };
@@ -5733,7 +5813,7 @@ async function syncTinvest({ silent = false, force = false } = {}) {
 // buyRecommendations не переэкспортируем: он уже лежит в SH из advisor.js,
 // а обёртка «SH.x = (…) => SH.x(…)» затирала бы оригинал собой — прямой
 // путь в бесконечную рекурсию.
-return {findIdeas, findReplacements, getSecurityDetails,
+return {mapLimit, findIdeas, findReplacements, getSecurityDetails,
         syncTinvest, subscribe, getState, addOperation, removeOperation, setAveragePrice, setSetting, applySync, updatePrices, importTrades, resetAll, exportBackup, importBackup, init, explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, crashTest, valueChart, marketContext, rateMeaning};
 })());
 
@@ -5776,6 +5856,7 @@ const periodReport = SH.periodReport;
 const payoutsByMonth = SH.payoutsByMonth;
 const benchmarkCompare = SH.benchmarkCompare;
 const timeWeightedReturn = SH.timeWeightedReturn;
+const positionResult = SH.positionResult;
 const fetchIndexHistory = SH.fetchIndexHistory;
 const crashTest = SH.crashTest;
 const daysBetween = SH.daysBetween;
@@ -7148,7 +7229,10 @@ async function openPlan() {
           : `База — ${money(pc.base)} в месяц из настроек. Впиши другую сумму, если в этом месяце вносишь иначе, — правка живёт один месяц.`}</p>
         ${cp.steps.map(t => `<p style="margin:6px 0">${money(t.amount)} → <b>${
           t.name ? esc(t.name) : `${clsName[t.cls]}: нужна новая бумага`}</b>${
-          t.lots != null ? (t.lots > 0 ? ` — примерно ${t.lots} шт по ${t.price} ₽` : ` <span style="color:var(--warn)">— одна штука дороже этой части взноса, копи или измени деление</span>`) : ''}${
+          t.lots != null ? (t.lots > 0
+            ? ` — ${t.lots} шт по ${t.price} ₽${t.lotSize > 1 ? ` (${t.wholeLots} ${t.wholeLots === 1 ? 'лот' : t.wholeLots < 5 ? 'лота' : 'лотов'} по ${t.lotSize})` : ''}${
+                t.leftover > 50 ? `, останется ${money(t.leftover)}` : ''}`
+            : ` <span style="color:var(--warn)">— ${t.lotSize > 1 ? `лот из ${t.lotSize} шт` : 'одна штука'} дороже этой части взноса, копи или измени деление</span>`) : ''}${
           t.blockReason ? `<br><span class="muted">${esc(t.blockReason)}</span>` : ''}</p>`).join('')}
         <p class="muted" style="margin-top:8px">Деление — по степени недобора до целевых долей: класс, отстающий сильнее, получает больше. Внутри класса названа бумага с наибольшей фактической доходностью из уже имеющихся.</p>
       </div>`;
@@ -7173,15 +7257,11 @@ async function openPlan() {
           <button class="btn ghost wide" id="bPlanMore" style="margin-bottom:10px">Показать ещё ${hidden.length} ${word(hidden.length)}</button>` : '');
     })()}
 
-    <h3 style="margin:18px 0 6px;font-size:15px">Подобрать бумаги под этот план</h3>
-    <p class="muted" style="margin:0 0 10px;line-height:1.6">Условия отбора приложение возьмёт само —
-      из твоей стратегии, срока цели и ставки денежного рынка. Ищется по всей Мосбирже.</p>
-    <div class="row" style="margin:0 0 4px">
-      <button class="btn ghost" id="bIdeaBonds" style="flex:1;margin:0">Облигации</button>
-      <button class="btn ghost" id="bIdeaStocks" style="flex:1;margin:0">Акции</button>
-      <button class="btn ghost" id="bIdeaSwap" style="flex:1;margin:0">Замены</button>
-    </div>
-    <div id="ideasOut">${ideaResult ? renderIdeas(ideaResult) : ''}</div>
+    <h3 style="margin:20px 0 6px;font-size:15px">Что можно купить на рынке</h3>
+    <div id="ideasOut"><div class="muted" style="line-height:1.6">Ищу по всей Мосбирже под твою стратегию…</div></div>
+
+    <h3 style="margin:20px 0 6px;font-size:15px">Что можно поменять</h3>
+    <div id="swapsOut"><div class="muted" style="line-height:1.6">Сравниваю каждую твою бумагу с рынком…</div></div>
 
     ${plan.length ? `<div style="height:6px"></div>
       <button class="btn ghost wide" id="bBuyManual">Разобрать конкретную покупку</button>` : ''}`);
@@ -7196,54 +7276,70 @@ async function openPlan() {
   if (ks) ks.onclick = () => setKind('stocks');
   if (kw) kw.onclick = () => setKind('swap');
 
-  // Условия отбора приложение выводит само — из стратегии, цели и ставки.
-  // Полей ввода нет намеренно: человек пришёл за ответом, а не за настройкой
-  // фильтров; всё, что нужно для отбора, приложение уже знает о портфеле.
-  const runIdeas = async (kind) => {
-    ideaKind = kind;
-    const out = $('ideasOut');
-    if (!out) return;
+  // Поиск по рынку запускается САМ и не задерживает лист: человек видит план
+  // сразу, а разделы дозаполняются по мере ответа биржи. Кнопки убраны —
+  // если возможностью не пользуются, виноват интерфейс, а не человек.
+  const marketRate = async () => {
+    const m = await withLimit(store.marketContext(), 4, {}) || {};
+    return m.moneyRate > 0 ? m.moneyRate / 100 : 0.16;
+  };
 
-    if (kind === 'swap') {
-      out.innerHTML = '<div class="muted" style="margin:10px 0">Сравниваю твои бумаги с рынком — это дольше обычного, до 40 секунд…</div>';
-      const r = await withLimit(store.findReplacements(), 40, null);
-      ideaResult = r ? { swaps: r.ideas, checked: r.checked }
-        : { error: 'Мосбиржа не ответила за 40 секунд. С файла биржа недоступна — открой приложение по ссылке: «Ещё» → «Разместить в интернете».' };
-      out.innerHTML = renderIdeas(ideaResult);
-      bindIdeaButtons();
-      return;
-    }
+  // Какой класс искать: тот, которого не хватает сильнее. Защиту скринер
+  // не ищет — у золота нет ни выплат, ни срока, сравнивать нечем.
+  const shares = st.summary.securities > 0
+    ? { stocks: (st.summary.byClass.stocks || 0) / st.summary.securities,
+        bonds: (st.summary.byClass.bonds || 0) / st.summary.securities }
+    : { stocks: 0, bonds: 0 };
+  const gapStocks = (st.targets.stocks || 0) - shares.stocks;
+  const gapBonds = (st.targets.bonds || 0) - shares.bonds;
+  const kind = gapBonds >= gapStocks ? 'bonds' : 'stocks';
 
-    const market = await withLimit(store.marketContext(), 4, {}) || {};
-    const rate = market.moneyRate > 0 ? market.moneyRate / 100 : 0.16;
-    const goalYears = Number(st.settings.goal?.years) || 0;
-    const filters = kind === 'bonds'
-      // Облигация имеет смысл, если платит не меньше денежного рынка,
-      // и гасится не позже цели — иначе к сроку придётся продавать по рынку.
-      ? { minYTM: Math.max(0.10, rate - 0.01), maxYears: goalYears || 5 }
-      // Акции отбираются по фактическим выплатам и их постоянству.
-      : { minYield: 0.06, minStreak: 3 };
-
-    out.innerHTML = `<div class="muted" style="margin:10px 0">Спрашиваю Мосбиржу${
-      kind === 'stocks' ? ' — по акциям ещё и историю выплат, это дольше' : ''}. Не дольше 25 секунд…</div>`;
-    const res = await withLimit(store.findIdeas(kind, filters), 25, null);
-    if (!res) {
-      ideaResult = { error: 'Мосбиржа не ответила за 25 секунд. С файла биржа недоступна — открой приложение по ссылке: «Ещё» → «Разместить в интернете».' };
-    } else {
+  async function fillMarketIdeas() {
+    const box = $('ideasOut');
+    if (!box) return;
+    try {
+      const goalYears = Number(st.settings.goal?.years) || 0;
+      const rate = await marketRate();
+      const filters = kind === 'bonds'
+        ? { minYTM: Math.max(0.10, rate - 0.01), maxYears: goalYears || 5 }
+        : { minYield: 0.06, minStreak: 3 };
+      const res = await withLimit(store.findIdeas(kind, filters), 25, null);
+      if (!box.isConnected && !box.innerHTML) return;      // лист закрыли — молча уходим
+      if (!res) {
+        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 25 секунд —
+          поиск по рынку сейчас недоступен. Всё остальное в плане посчитано и работает.</div>`;
+        return;
+      }
       const st2 = await store.getState();
       ideaResult = { rows: res.rows, rec: SH.buyRecommendations(st2, res.rows),
         criteria: kind === 'bonds'
-          ? `Условия: доходность к погашению от ${(filters.minYTM * 100).toFixed(1)}% (ориентир — денежный рынок) и погашение не позже ${filters.maxYears} лет — до твоей цели.`
-          : `Условия: выплаты за 12 месяцев от 6% и минимум 3 года подряд.` };
+          ? `Искал облигации: доходность к погашению от ${(filters.minYTM * 100).toFixed(1)}% (ориентир — денежный рынок) и погашение не позже ${filters.maxYears} лет, до твоей цели. Их не хватает сильнее всего.`
+          : `Искал акции: выплаты за 12 месяцев от 6% и минимум 3 года подряд. Их не хватает сильнее всего.` };
+      box.innerHTML = renderIdeas(ideaResult);
+      bindIdeaButtons();
+    } catch (err) {
+      box.innerHTML = `<div class="muted">Поиск по рынку не удался: ${esc(err.message || String(err))}</div>`;
     }
-    out.innerHTML = renderIdeas(ideaResult);
-    bindIdeaButtons();
-  };
+  }
+  fillMarketIdeas();
 
-  const bBonds = $('bIdeaBonds'), bStocks = $('bIdeaStocks'), bSwap = $('bIdeaSwap');
-  if (bBonds) bBonds.onclick = () => runIdeas('bonds');
-  if (bStocks) bStocks.onclick = () => runIdeas('stocks');
-  if (bSwap) bSwap.onclick = () => runIdeas('swap');
+  async function fillReplacements() {
+    const box = $('swapsOut');
+    if (!box) return;
+    try {
+      const r = await withLimit(store.findReplacements(), 40, null);
+      if (!r) {
+        box.innerHTML = `<div class="muted" style="line-height:1.6">Биржа не ответила за 40 секунд —
+          сравнение с рынком сейчас недоступно.</div>`;
+        return;
+      }
+      box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
+      bindIdeaButtons();
+    } catch (err) {
+      box.innerHTML = `<div class="muted">Сравнение с рынком не удалось: ${esc(err.message || String(err))}</div>`;
+    }
+  }
+  fillReplacements();
 
   const more = $('bPlanMore');
   if (more) more.onclick = () => { $('planMore').style.display = 'block'; more.style.display = 'none'; };
@@ -7285,12 +7381,17 @@ function openWhatsNew() {
     ${item('Починено вечное «Считаю…»', 'Девять функций внутри приложения вызывали сами себя без конца: экран висел, память росла. Причина устранена, класс ошибки закрыт проверкой.')}
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
+    ${item('Сравнения выплат стали честнее', 'Приложение больше не предлагает равняться на бумагу, которую само велит не докупать: сравнение идёт только с бумагами в пределах лимита доли. А выплата выше 20% помечается как почти наверняка разовая.')}
+    ${item('План считает лотами', 'На бирже покупают лотами: у Сбера и МТС в лоте 10 акций. План больше не советует «111 шт» — он называет целые лоты и остаток, который не потратится.')}
+    ${item('Рынок — сам, без кнопок', 'В «Что стоит сделать» появились разделы «Что можно купить на рынке» и «Что можно поменять»: приложение ищет по всей Мосбирже само, пока ты читаешь план. Нажимать ничего не нужно.')}
+    ${item('Поиск по всей бирже — быстрее', 'Кнопки «Облигации», «Акции» и «Замены» внизу этого листа ищут бумаги на всей Мосбирже, а не в портфеле. История выплат теперь грузится в пять потоков — на мобильной сети это разница между ответом и отказом по времени.')}
+    ${item('Честный результат по бумаге', 'На карточке позиции — не только изменение цены, но и полученные по ней выплаты: в день дивиденда цена падает на его размер, и часть «минуса» ты уже получил деньгами.')}
     ${item('План взноса не спорит с советами', 'Деньги больше не отправляются в бумагу, которую соседняя карточка велит не докупать: учитываются лимит доли (25%) и сектора (35%), а если подходящей бумаги нет — сказано прямо, что нужна новая.')}
     ${item('Риск считается правильно', 'Волатильность портфеля больше не среднее взвешенное: учитываются связи классов между собой. Смесь колеблется слабее своих частей — в этом и смысл распределения, и теперь оно видно в числах.')}
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 138 автоматических проверок и 99 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 144 автоматические проверки и 106 мутационных, все зелёные.</p>`);
 }
 
 /**
@@ -7742,7 +7843,17 @@ async function openSecurity(ticker) {
         <button class="btn" id="bSetPrice" style="flex:1">Сохранить</button>
       </div>` : ''}
     <div class="diff">Стоимость <b>${money(v)}</b>, вложено ${money(c)} —
-      <b class="${r >= 0 ? 'up' : 'down'}">${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%</b></div>
+      <b class="${r >= 0 ? 'up' : 'down'}">${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%</b> по цене</div>
+    ${(() => {
+      const res = positionResult(st0.ops || [], p);
+      if (!res || !(res.paid > 0)) return '';
+      return `<div class="diff">С учётом полученных выплат — <b class="${res.total >= 0 ? 'up' : 'down'}">${
+        res.total >= 0 ? '+' : ''}${(res.totalPct * 100).toFixed(1)}%</b>:
+        дивиденды и купоны по этой бумаге принесли <b style="color:var(--ok)">${money(res.paid)}</b>, они уже на счёте.
+        ${res.rescued
+          ? 'Цена в минусе, но вместе с выплатами позиция в плюсе — так и бывает у щедрых плательщиков.'
+          : 'В день выплаты цена падает примерно на её размер: часть этого «минуса» ты уже получил деньгами.'}</div>`;
+    })()}
     ${(() => {
       const role = positionRole(st0, p, { ytm: f.ytm, yieldPct: f.yieldTtm });
       return `<div class="diff"><b>Роль в портфеле: ${esc(role.role)}.</b> ${esc(role.text)}
