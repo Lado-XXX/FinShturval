@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30ak</title>
+<title>Штурвал · 2026-07-30al</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30ak';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30al';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -2926,14 +2926,26 @@ function tableRows(block) {
  * P/E и прибыли ISS не отдаёт — ни здесь, ни где-либо ещё: см. screener.js,
  * где об этом сказано прямо, вместо того чтобы подсунуть выдуманное число.
  */
-async function fetchAllStocks() {
-  const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json`
-    + `?iss.meta=off&iss.only=securities,marketdata`
-    + `&securities.columns=SECID,SHORTNAME,PREVPRICE,ISSUESIZE,LOTSIZE`
-    + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION`, 20000);
-  const md = new Map(tableRows(j?.marketdata).map(r => [r.SECID, r]));
+async function fetchAllStocks(maxPages = 3) {
+  // Биржа отдаёт доску одним куском в несколько сотен строк. На мобильной
+  // сети такой ответ не успевает прийти за отведённое время, и поиск падал
+  // ещё на списке. Просим страницами по сотне: каждая приходит за секунды,
+  // а первых трёхсот бумаг по обороту хватает с запасом.
+  const securities = [], marketdata = [];
+  for (let page = 0; page < maxPages; page++) {
+    const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json`
+      + `?iss.meta=off&iss.only=securities,marketdata&start=${page * 100}`
+      + `&securities.columns=SECID,SHORTNAME,PREVPRICE,ISSUESIZE,LOTSIZE`
+      + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION`, 15000);
+    const secPage = tableRows(j?.securities);
+    securities.push(...secPage);
+    marketdata.push(...tableRows(j?.marketdata));
+    if (secPage.length < 100) break;      // страница неполная — доска кончилась
+  }
+
+  const md = new Map(marketdata.map(r => [r.SECID, r]));
   const out = [];
-  for (const r of tableRows(j?.securities)) {
+  for (const r of securities) {
     const m = md.get(r.SECID) || {};
     const price = m.LAST > 0 ? m.LAST : (m.MARKETPRICE > 0 ? m.MARKETPRICE : r.PREVPRICE);
     if (!(price > 0)) continue;
@@ -2951,21 +2963,31 @@ async function fetchAllStocks() {
  * Облигации: ОФЗ (TQOB) и корпоративные (TQCB). Доходность к погашению
  * и срок биржа отдаёт сама — здесь ничего считать на глазок не нужно.
  */
-async function fetchAllBonds(kinds = ['gov', 'corp']) {
+async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
+  // По умолчанию только ОФЗ: их шесть десятков, ответ приходит мгновенно.
+  // Доска корпоративных — тысячи выпусков и мегабайты, из-за неё поиск
+  // не доживал до конца. Корпоративные просим отдельно и тоже страницами.
   const boards = [];
   if (kinds.includes('gov')) boards.push(['TQOB', 'gov']);
   if (kinds.includes('corp')) boards.push(['TQCB', 'corp']);
   const out = [];
   for (const [board, type] of boards) {
-    let j;
-    try {
-      j = await fetchJSON(`${ISS}/engines/stock/markets/bonds/boards/${board}/securities.json`
-        + `?iss.meta=off&iss.only=securities,marketdata_yields`
-        + `&securities.columns=SECID,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONVALUE,COUPONPERCENT,COUPONPERIOD,FACEVALUE,PREVPRICE`
-        + `&marketdata_yields.columns=SECID,EFFECTIVEYIELD,DURATION`, 20000);
-    } catch { continue; }
-    const yields = new Map(tableRows(j?.marketdata_yields).map(r => [r.SECID, r]));
-    for (const r of tableRows(j?.securities)) {
+    const rows = [], yieldRows = [];
+    for (let page = 0; page < maxPages; page++) {
+      let j;
+      try {
+        j = await fetchJSON(`${ISS}/engines/stock/markets/bonds/boards/${board}/securities.json`
+          + `?iss.meta=off&iss.only=securities,marketdata_yields&start=${page * 100}`
+          + `&securities.columns=SECID,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONVALUE,COUPONPERCENT,COUPONPERIOD,FACEVALUE,PREVPRICE`
+          + `&marketdata_yields.columns=SECID,EFFECTIVEYIELD,DURATION`, 15000);
+      } catch { break; }
+      const secPage = tableRows(j?.securities);
+      rows.push(...secPage);
+      yieldRows.push(...tableRows(j?.marketdata_yields));
+      if (secPage.length < 100) break;
+    }
+    const yields = new Map(yieldRows.map(r => [r.SECID, r]));
+    for (const r of rows) {
       const y = yields.get(r.SECID) || {};
       const face = r.FACEVALUE > 0 ? r.FACEVALUE : 1000;
       const price = r.PREVPRICE > 0 ? r.PREVPRICE * face / 100 : null;
@@ -5714,7 +5736,7 @@ async function findReplacements() {
 
   if (myBonds.length) {
     marketStage = 'список облигаций';
-    const all = await moex.fetchAllBonds(['gov', 'corp']);
+    const all = await moex.fetchAllBonds(['gov']);
     const mine = new Set(myBonds.map(p => p.ticker));
     for (const r of all) {
       if (mine.has(r.ticker)) facts.push({ ticker: r.ticker, ytm: r.ytm, yearsLeft: r.yearsLeft });
@@ -7462,6 +7484,7 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Списки биржи — страницами', 'Поиск падал на самом списке бумаг: один ответ на сотни строк не доходил по мобильной сети. Теперь страницы по сотне, а корпоративные облигации (тысячи выпусков) по умолчанию не тянутся вовсе.')}
     ${item('Видно, где застрял поиск', 'Если биржа не отвечает, раздел говорит, чего именно не дождался: списка акций, списка облигаций или историй выплат.')}
     ${item('Поиск по рынку успевает ответить', 'Список кандидатов сокращён до двенадцати крупнейших, запросы идут в шесть потоков, а ожидание поднято до 45 и 60 секунд: на мобильной сети прежних сроков не хватало.')}
     ${item('Ложные расхождения в сверке исчезли', 'Если брокер не отвечает на запрос названия бумаги, приложение берёт имя из запаса, а не подставляет технический код. Диагностика больше не пугает красным «≠» там, где данные целы.')}
@@ -7475,7 +7498,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 147 автоматических проверок и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 148 автоматических проверок и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
