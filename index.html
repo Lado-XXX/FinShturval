@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30as</title>
+<title>Штурвал · 2026-07-30ay</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30as';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30ay';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -1800,6 +1800,17 @@ function replacementIdeas(state, candidates = [], opts = {}) {
 
       if (cls === 'bonds') {
         if (!(c.ytm > 0) || !(mine.ytm > 0)) continue;
+
+        // Фонд денежного рынка — особый случай: у него нет срока и купона,
+        // зато нет и риска цены. Если облигация платит меньше ставки, это
+        // измеримая неполноценность: те же деньги дают больше без ожидания
+        // погашения. Проверки срока и оферты к фонду неприменимы.
+        if (c.fundKind === 'money') {
+          const gain = value * (c.ytm - mine.ytm);
+          if (c.ytm - mine.ytm < MIN_YTM_GAP || gain < MIN_GAIN_RUB || gain <= cost * 3) continue;
+          if (!best || gain > best.gain) best = { c, gain, kind: 'money' };
+          continue;
+        }
         if (c.ytm - mine.ytm < MIN_YTM_GAP) continue;
         // С офертой раньше цели «доходность к погашению» — обещание, которое
         // может не дожить до срока. Такую замену не предлагаем вовсе:
@@ -1835,8 +1846,46 @@ function replacementIdeas(state, candidates = [], opts = {}) {
 
     const rub = v => Math.round(v).toLocaleString('ru-RU') + ' \u20bd';
     const payback = best.gain > 0 ? cost / best.gain * 12 : null;
+
+    /**
+     * Как исполнить обмен, не потеряв на мелочах. Совет без инструкции —
+     * половина совета: почти все потери при перекладке случаются не от
+     * выбора бумаги, а от способа сделки.
+     */
+    const howTo = (fromName, toName, isBond) => [
+      `Делай обе сделки в один день и подряд: продал — сразу купил. Разрыв в день-два — это риск, `
+        + `что новая бумага подорожает, и выгода обмена испарится.`,
+      `Ставь ЛИМИТНУЮ заявку, а не «по рынку». В стакане бывает разрыв между покупкой и продажей: `
+        + `рыночная заявка исполнится по худшей цене, и на этом теряют больше, чем на комиссии.`,
+      `Не торгуй в первые и последние 10 минут сессии: в это время разрыв цен шире всего.`,
+      isBond
+        ? `Накопленный купон при продаже ты получаешь, а при покупке платишь — это не потеря, а перенос: `
+          + `на итог обмена он почти не влияет, но сумма сделки будет больше цены из стакана.`
+        : `Проверь лот: у многих акций в лоте 10 штук, и купить можно только кратно ему.`,
+      `Деньги от продажи доступны для покупки сразу, но расчёты идут следующим днём — вывести их можно позже.`,
+      `На ИИС налог с прибыли сейчас не удерживается, но продажа фиксирует результат по бумаге: `
+        + `если она в минусе, убыток становится настоящим и на другие счета не переносится.`
+    ];
+
+    if (best.kind === 'money') {
+      out.push({
+        kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
+        how: howTo(p.name, best.c.name, false),
+        title: `${p.name} → ${best.c.name} (денежный рынок)`,
+        detail: `Твоя бумага даёт ${(mine.ytm * 100).toFixed(1)}% к погашению, денежный рынок — около `
+          + `${(best.c.ytm * 100).toFixed(1)}% прямо сейчас. На позиции в ${rub(value)} разница примерно `
+          + `${rub(best.gain)} в год, комиссии обмена ${rub(cost)}. У фонда нет срока: деньги можно забрать в любой день, `
+          + `и цена пая не падает от роста ставки.`,
+        note: `Обратная сторона: ставка не зафиксирована — снизится ЦБ, снизится и доход, тогда как купон облигации `
+          + `остаётся прежним. Комиссию управляющего биржа не публикует, её надо смотреть в правилах фонда — `
+          + `она уменьшает результат каждый год. И продажа облигации фиксирует её текущий результат.`
+      });
+      continue;
+    }
+
     out.push(best.kind === 'bonds' ? {
       kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
+      how: howTo(p.name, best.c.name, true),
       title: `${p.name} → ${best.c.name}`,
       detail: `${(mine.ytm * 100).toFixed(1)}% против ${(best.c.ytm * 100).toFixed(1)}% к погашению. `
         + `На твоей позиции в ${rub(value)} разница даёт около ${rub(best.gain)} в год; `
@@ -1847,6 +1896,7 @@ function replacementIdeas(state, candidates = [], opts = {}) {
         + `а на ИИС он не уменьшит налоги по другим счетам.`
     } : {
       kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
+      how: howTo(p.name, best.c.name, false),
       title: `${p.name} → ${best.c.name}`,
       detail: `Выплаты за 12 месяцев: ${((mine.yieldPct || 0) * 100).toFixed(1)}% против ${(best.c.yieldPct * 100).toFixed(1)}%, `
         + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд. На позиции в ${rub(value)} `
@@ -1860,7 +1910,162 @@ function replacementIdeas(state, candidates = [], opts = {}) {
   return out;
 }
 
-return {STRATEGIES, LIMITS, primaryAction, allSteps, classLabel, taxDeduction, policyStatement, buyRecommendations, replacementIdeas};
+/**
+ * ВЕРДИКТ: один связный ответ вместо россыпи карточек.
+ *
+ * Так работает хороший советник: он не вываливает наблюдения, а называет
+ * порядок действий и объясняет замысел — от цели и бюджета, а не от
+ * отдельной бумаги. Здесь собрано всё измеримое: резерв, взнос, доли,
+ * ставка, вычет, сроки. Ни одного предсказания цен: их не знает никто,
+ * и обещать «на выходе больше денег» — единственное, чего советник
+ * такого уровня себе не позволяет.
+ *
+ * Каждый шаг обязан отвечать на три вопроса: что сделать, сколько это
+ * стоит или даёт в рублях, и почему именно сейчас.
+ */
+function verdict(state, opts = {}) {
+  const s = state.summary;
+  if (!s || !(s.securities > 0)) return null;
+
+  const settings = state.settings || {};
+  const monthly = Number(settings.monthlyContribution) || 0;
+  const expenses = Number(settings.monthlyExpenses) || 0;
+  const reserve = Number(state.reserve) || 0;
+  const reserveTarget = expenses * LIMITS.reserveMonths;
+  const rate = Number(opts.moneyRate) || 0;
+  const goalAmount = Number(settings.goal?.amount) || 0;
+  const goalYears = Number(settings.goal?.years) || 0;
+  const yearDeposits = Number(opts.yearDeposits) || 0;
+  const ndfl = Number(settings.ndflRate) || 0.13;
+
+  const steps = [];
+  const money = v => Math.round(v).toLocaleString('ru-RU') + ' \u20bd';
+
+  // 1. Резерв. Первое правило — не потерять: без подушки любая просадка
+  //    заставляет продавать бумаги в худший момент.
+  if (reserveTarget > 0 && reserve < reserveTarget) {
+    const months = expenses > 0 ? reserve / expenses : 0;
+    const half = Math.round(monthly / 2);
+    steps.push({
+      what: reserve <= 0
+        ? `Сначала резерв: откладывать ${money(half)} из взноса, пока не наберётся ${money(reserveTarget)}`
+        : `Делить взнос пополам: ${money(half)} в резерв, ${money(monthly - half)} в рынок`,
+      why: `Отложено ${money(reserve)} — это ${months.toFixed(1)} мес жизни при расходах ${money(expenses)}. `
+        + `Цель — три месяца. Пока подушки нет, любая просадка или потеря дохода заставит продавать бумаги `
+        + `в худший момент, и убыток станет настоящим.`,
+      weight: 1
+    });
+  }
+
+  // 2. Куда идёт ближайший взнос — с точностью до бумаги.
+  if (opts.contribution && opts.contribution.steps?.length) {
+    const parts = opts.contribution.steps
+      .filter(x => x.amount > 0)
+      .map(x => `${money(x.amount)} → ${x.name || classLabel(x.cls)}`);
+    steps.push({
+      what: `Ближайший взнос ${money(opts.contribution.amount)}: ${parts.join(', ')}`,
+      why: `Деление — по степени недобора до целевых долей, а не по вкусу: класс, отстающий сильнее, `
+        + `получает больше. Так доли выравниваются сами, без продаж и без комиссий.`,
+      weight: 2
+    });
+  }
+
+  // 3. Замена, если рынок даёт измеримо больше.
+  if (opts.swap) {
+    steps.push({
+      what: `Поменять: ${opts.swap.title}`,
+      why: `${opts.swap.detail} Это единственный вид совета о продаже, который приложение себе позволяет: `
+        + `выгода известна заранее, а не предполагается.`,
+      how: opts.swap.how || null,   // как исполнить, не потеряв на мелочах
+      weight: 3
+    });
+  }
+
+  // 4. Вычет — деньги, которые государство отдаёт за уже сделанное.
+  const limit = 400000;
+  if (yearDeposits > 0 && yearDeposits < limit) {
+    const left = limit - yearDeposits;
+    steps.push({
+      what: `Довнести до ${money(limit)} за год — осталось ${money(left)}`,
+      why: `Это вернёт ещё ${money(left * ndfl)} вычетом. Единственная доходность в портфеле, которая `
+        + `известна заранее и не зависит от рынка. Взнос 1 января засчитается уже в следующий год.`,
+      weight: 4
+    });
+  }
+
+  // Замысел целиком: связь с целью и бюджетом.
+  const plan = goalAmount > 0 && goalYears > 0
+    ? `Цель — ${money(goalAmount)} за ${goalYears} ${goalYears < 5 ? 'года' : 'лет'} при взносе ${money(monthly)} в месяц. `
+      + `Главный двигатель здесь не выбор бумаг, а регулярность взносов и время: рынок добавляет разброс, `
+      + `а взносы — уверенность.`
+    : `Цель не задана — без неё советовать можно только про доли и риск, но не про срок.`;
+
+  const rateNote = rate > 0
+    ? ` Ставка денежного рынка ${opts.rateSource ? `(${opts.rateSource}) ` : ''}сейчас ${(rate * 100).toFixed(1)}% — `
+      + `это биржевая ставка коротких денег, близкая к ключевой, но не она сама. Деньги дороги, поэтому облигации `
+      + `и денежный рынок платят необычно много, а акции проигрывают им в выплатах. Это состояние рынка, а не приговор акциям.`
+    : '';
+
+  return {
+    steps: steps.sort((a, b) => a.weight - b.weight),
+    plan: plan + rateNote,
+    caution: 'Ни один советник не знает будущих цен. Всё выше посчитано из того, что можно проверить: '
+      + 'твои доли, выплаты, ставки, сроки и лимиты. Обещание «станет больше денег» — первый признак, что вас обманывают.'
+  };
+}
+
+/**
+ * План конкретного обмена: сколько продать, за сколько, сколько купить и
+ * что останется. Общая инструкция объясняет правила, а этот план подставляет
+ * в них твои числа — иначе человеку приходится считать самому, а именно на
+ * счёте в уме и теряются деньги.
+ *
+ * Все суммы — оценка по последней известной цене: в момент сделки цена будет
+ * другой, поэтому в плане названы допуски, а не обещания.
+ */
+function swapPlan(state, idea, opts = {}) {
+  if (!idea || !idea.from || !idea.to) return null;
+  const pos = (state.positions || []).find(p => p.ticker === idea.from);
+  if (!pos || !(pos.qty > 0)) return null;
+
+  const fee = Number(state.settings?.brokerFee) || 0.0004;
+  const sellPrice = Number(pos.price) || 0;
+  const buyPrice = Number(opts.buyPrice) || 0;
+  const buyLot = Number(opts.buyLot) || 1;
+  const sellLot = Number(state.settings?.lots?.[idea.from]) || 1;
+
+  const gross = pos.qty * sellPrice;
+  const sellFee = gross * fee;
+  const proceeds = gross - sellFee;
+
+  // Сколько влезет в вырученное, с учётом лота и комиссии покупки
+  const lotCost = buyPrice > 0 ? buyPrice * buyLot * (1 + fee) : 0;
+  const lots = lotCost > 0 ? Math.floor(proceeds / lotCost) : null;
+  const buyQty = lots != null ? lots * buyLot : null;
+  const spent = buyQty != null ? buyQty * buyPrice * (1 + fee) : 0;
+  const leftover = buyQty != null ? proceeds - spent : proceeds;
+
+  // Допуск на цену: если рынок уйдёт дальше, обмен теряет смысл — считаем,
+  // насколько он может уйти, пока годовая выгода не съедена целиком.
+  const tolerance = idea.gain > 0 && gross > 0
+    ? Math.max(0.002, Math.min(0.02, idea.gain / gross / 2)) : 0.005;
+
+  return {
+    from: idea.from, to: idea.to,
+    fromName: pos.name || idea.from, toName: opts.toName || idea.to,
+    sellQty: pos.qty, sellLot, sellPrice, gross, sellFee, proceeds,
+    buyPrice, buyLot, lots, buyQty, spent, leftover,
+    feeTotal: sellFee + (buyQty != null ? buyQty * buyPrice * fee : 0),
+    tolerance,
+    // Границы разумной цены: дальше них обмен уже не окупается
+    minSell: sellPrice > 0 ? sellPrice * (1 - tolerance) : 0,
+    maxBuy: buyPrice > 0 ? buyPrice * (1 + tolerance) : 0,
+    gain: idea.gain || 0,
+    incomplete: !(buyPrice > 0)
+  };
+}
+
+return {STRATEGIES, LIMITS, primaryAction, allSteps, classLabel, taxDeduction, policyStatement, buyRecommendations, replacementIdeas, verdict, swapPlan};
 })());
 
 /* ─── core/screener.js ─── */
@@ -2939,7 +3144,14 @@ async function fetchMarketPulse() {
         + `?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,CURRENTVALUE,LASTVALUE`);
       const row = (j?.marketdata?.data || [])[0];
       const v = row ? (row[1] ?? row[2]) : null;
-      if (v != null && v > 1 && v < 50) { out.moneyRate = Math.round(v * 10) / 10; break; }
+      // Важно называть источник: RUSFAR и RUONIA — ставки ДЕНЕЖНОГО РЫНКА,
+      // а не ключевая ставка ЦБ. Они близки к ней, но это разные величины,
+      // и выдавать одну за другую — вводить человека в заблуждение.
+      if (v != null && v > 1 && v < 50) {
+        out.moneyRate = Math.round(v * 10) / 10;
+        out.moneyRateSource = id;
+        break;
+      }
     } catch { /* пробуем следующий индикатор */ }
   }
   return out;
@@ -2972,6 +3184,41 @@ async function probeExchange() {
     }
   }
   return out;
+}
+
+/**
+ * Ключевая ставка ЦБ. Биржа её не публикует: RUSFAR и RUONIA — ставки
+ * денежного рынка, близкие, но другие. Официальный источник — сам Банк
+ * России; он отдаёт данные так, что браузер страницы может не получить
+ * доступ к ответу. Поэтому: пробуем, и если не вышло — приложение просит
+ * вписать ставку руками, а не подсовывает похожее число вместо неё.
+ */
+async function fetchKeyRate(timeoutMs = 8000) {
+  const soap = `<?xml version="1.0" encoding="utf-8"?>`
+    + `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">`
+    + `<soap:Body><KeyRateXML xmlns="http://web.cbr.ru/">`
+    + `<fromDate>${new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)}</fromDate>`
+    + `<ToDate>${new Date().toISOString().slice(0, 10)}</ToDate>`
+    + `</KeyRateXML></soap:Body></soap:Envelope>`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch('https://www.cbr.ru/DailyInfoWebServ/DailyInfo.asmx', {
+      method: 'POST', signal: ctrl.signal,
+      headers: { 'Content-Type': 'text/xml; charset=utf-8',
+                 'SOAPAction': 'http://web.cbr.ru/KeyRateXML' },
+      body: soap
+    });
+    if (!r.ok) return null;
+    const text = await r.text();
+    // Берём последнюю пару <DT>дата</DT><Rate>значение</Rate>
+    const items = [...text.matchAll(/<DT>([^<]+)<\/DT>\s*<Rate>([\d.,]+)<\/Rate>/g)];
+    if (!items.length) return null;
+    const last = items[items.length - 1];
+    const value = parseFloat(String(last[2]).replace(',', '.'));
+    return value > 0 && value < 100 ? { rate: value / 100, date: last[1].slice(0, 10) } : null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
 }
 
 /**
@@ -3021,26 +3268,24 @@ function tableRows(block) {
  * P/E и прибыли ISS не отдаёт — ни здесь, ни где-либо ещё: см. screener.js,
  * где об этом сказано прямо, вместо того чтобы подсунуть выдуманное число.
  */
-async function fetchAllStocks(maxPages = 3) {
-  // Биржа отдаёт доску одним куском в несколько сотен строк. На мобильной
-  // сети такой ответ не успевает прийти за отведённое время, и поиск падал
-  // ещё на списке. Просим страницами по сотне: каждая приходит за секунды,
-  // а первых трёхсот бумаг по обороту хватает с запасом.
-  const securities = [], marketdata = [];
-  for (let page = 0; page < maxPages; page++) {
-    const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json`
-      + `?iss.meta=off&iss.only=securities,marketdata&start=${page * 100}`
-      + `&securities.columns=SECID,SHORTNAME,PREVPRICE,ISSUESIZE,LOTSIZE`
-      + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION`, 15000);
-    const secPage = tableRows(j?.securities);
-    securities.push(...secPage);
-    marketdata.push(...tableRows(j?.marketdata));
-    if (secPage.length < 100) break;      // страница неполная — доска кончилась
-  }
+async function fetchAllStocks() {
+  // Биржа отдаёт всю доску одним ответом за доли секунды — просим целиком,
+  // чтобы видеть рынок, а не его верхушку. SECTYPE отделяет настоящие акции
+  // (обычные и привилегированные) от фондов и расписок, которые торгуются
+  // на той же доске и в отбор акций попадать не должны.
+  const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json`
+    + `?iss.meta=off&iss.only=securities,marketdata`
+    + `&securities.columns=SECID,SHORTNAME,PREVPRICE,ISSUESIZE,LOTSIZE,SECTYPE`
+    + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION`, 20000);
+  const securities = tableRows(j?.securities);
+  const marketdata = tableRows(j?.marketdata);
 
   const md = new Map(marketdata.map(r => [r.SECID, r]));
   const out = [];
   for (const r of securities) {
+    // '1' — обыкновенные акции, '2' — привилегированные. Всё остальное
+    // (фонды, расписки, паи) — не акции, и сравнивать их с акциями нельзя.
+    if (r.SECTYPE && !['1', '2'].includes(String(r.SECTYPE))) continue;
     const m = md.get(r.SECID) || {};
     const price = m.LAST > 0 ? m.LAST : (m.MARKETPRICE > 0 ? m.MARKETPRICE : r.PREVPRICE);
     if (!(price > 0)) continue;
@@ -3095,8 +3340,22 @@ async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
       const offer = r.OFFERDATE && r.OFFERDATE !== '0000-00-00' ? r.OFFERDATE : null;
       const yearsToOffer = offer ? Math.round(daysBetween(today(), offer) / 365.25 * 10) / 10 : null;
       if (!(y.EFFECTIVEYIELD > 0) || !(yearsLeft > 0)) continue;
+      // Три разных инструмента под одним словом «облигация»:
+      // • постоянный купон — известен до конца, страдает от роста ставки;
+      // • плавающий (ПК, флоатер) — купон привязан к ставке, защищает от её роста;
+      // • индексируемый номинал (ИН, линкер) — тело растёт с инфляцией,
+      //   и доходность к погашению у него означает доход СВЕРХ инфляции.
+      const idText = `${r.SECID} ${r.SHORTNAME || ''} ${r.SECNAME || ''}`;
+      const bondKind = /SU52|ИН(?![А-Яа-я])|индексируем/i.test(idText) ? 'linker'
+                     : (/SU29|ПК(?![А-Яа-я])|перемен|плавающ/i.test(idText)
+                        || (!(r.COUPONVALUE > 0))) ? 'floater' : 'fixed';
+      const bondLabel = bondKind === 'linker' ? 'номинал растёт с инфляцией'
+                      : bondKind === 'floater' ? 'купон привязан к ставке'
+                      : 'купон постоянный';
+
       out.push({
         ticker: r.SECID, name: r.SHORTNAME || r.SECID, issuer: r.SECNAME || r.SHORTNAME,
+        bondKind, bondLabel,
         ytm: y.EFFECTIVEYIELD / 100, yearsLeft, matDate: mat, price, face,
         offerDate: offer, yearsToOffer: yearsToOffer > 0 ? yearsToOffer : null,
         coupon: r.COUPONVALUE > 0 ? r.COUPONVALUE : null,
@@ -3111,6 +3370,47 @@ async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
   return out;
 }
 
+/**
+ * Биржевые фонды (доска TQTF): золото, денежный рынок, облигации, акции.
+ * Это третий вид инструментов рядом с акциями и облигациями, и для двух
+ * задач он незаменим: защита (золото) и деньги под ставку без срока.
+ *
+ * Вид фонда определяется по названию — биржа его не размечает. Комиссию
+ * управляющего ISS не отдаёт вовсе, поэтому приложение о ней честно
+ * молчит и говорит, где смотреть: она уменьшает результат каждый год.
+ */
+const FUND_KINDS = [
+  [/золот|gold/i, 'gold', 'золото'],
+  [/денежн|ликвидн|money|сберегательн/i, 'money', 'денежный рынок'],
+  [/облигац|бонд|bond|офз/i, 'bonds', 'облигации'],
+  [/акци|индекс|широк|equity/i, 'stocks', 'акции']
+];
+
+async function fetchAllFunds() {
+  const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQTF/securities.json`
+    + `?iss.meta=off&iss.only=securities,marketdata`
+    + `&securities.columns=SECID,SHORTNAME,SECNAME,PREVPRICE,LOTSIZE`
+    + `&marketdata.columns=SECID,LAST,MARKETPRICE,VALTODAY`, 20000);
+  const md = new Map(tableRows(j?.marketdata).map(r => [r.SECID, r]));
+  const out = [];
+  for (const r of tableRows(j?.securities)) {
+    const m = md.get(r.SECID) || {};
+    const price = m.LAST > 0 ? m.LAST : (m.MARKETPRICE > 0 ? m.MARKETPRICE : r.PREVPRICE);
+    if (!(price > 0)) continue;
+    const text = `${r.SHORTNAME || ''} ${r.SECNAME || ''}`;
+    const found = FUND_KINDS.find(([re]) => re.test(text));
+    out.push({
+      ticker: r.SECID, name: r.SHORTNAME || r.SECID, price,
+      lot: r.LOTSIZE || 1,
+      turnover: m.VALTODAY || 0,        // оборот за день — мера ликвидности
+      fundKind: found ? found[1] : 'other',
+      fundLabel: found ? found[2] : 'прочее',
+      kind: 'fund'
+    });
+  }
+  return out;
+}
+
 /** История дивидендов бумаги: суммы и даты закрытия реестра. */
 async function fetchDividendHistory(ticker) {
   const j = await fetchJSON(`${ISS}/securities/${encodeURIComponent(ticker)}/dividends.json?iss.meta=off`, 8000);
@@ -3121,7 +3421,7 @@ async function fetchDividendHistory(ticker) {
 }
 
 return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
-        fetchAllStocks, fetchAllBonds, fetchDividendHistory};
+        fetchKeyRate, fetchAllStocks, fetchAllBonds, fetchAllFunds, fetchDividendHistory};
 })());
 
 /* ─── data/screener.js ─── */
@@ -3190,6 +3490,14 @@ function fitScore(row, ctx = {}) {
     } else if (row.yearsLeft <= 5) score += 12;
     if (row.type === 'gov') { score += 12; why.push('госдолг: риск не в банкротстве, а в ставке'); }
     if (row.couponType === 'fixed') { score += 8; why.push('купон известен заранее'); }
+
+    // Вид облигации меняет смысл её доходности, и об этом стоит сказать.
+    if (row.bondKind === 'linker') {
+      score += 8;
+      why.push('номинал растёт с инфляцией — доходность указана СВЕРХ неё');
+    } else if (row.bondKind === 'floater') {
+      why.push('купон привязан к ставке: защищает от её роста, но падает вместе с ней');
+    }
     // Оферта раньше погашения обесценивает саму доходность к погашению:
     // считать её до срока, которого не будет, — самообман.
     if (row.yearsToOffer > 0 && row.yearsLeft > row.yearsToOffer + 0.1) {
@@ -5354,6 +5662,9 @@ async function getState() {
     // раньше неё счёта не было.
     iisOpenDate: meta.iisOpenDate || (ops.length ? ops.map(o => o.date).sort()[0] : null),
     iisTermYears: meta.iisTermYears || 5,
+    // Ключевая ставка: либо получена от ЦБ, либо вписана вручную. Хранится
+    // с датой — устаревшая ставка хуже отсутствующей, о ней надо напомнить.
+    keyRate: meta.keyRate && meta.keyRate.rate > 0 ? meta.keyRate : null,
     // Измеренная доходность своих облигаций к погашению. Прогноз подставит
     // её вместо допущения; протухшую (старше месяца) не берём.
     bondYtm: (meta.bondYtm && meta.bondYtm.value > 0
@@ -5812,6 +6123,26 @@ async function mapLimit(items, limit, fn) {
 let marketStage = null;
 const lastMarketStage = () => marketStage;
 
+/**
+ * Ключевая ставка: пробуем получить у ЦБ, иначе оставляем вписанную вручную.
+ * Проверяем не чаще раза в сутки — ставка меняется несколько раз в год.
+ */
+async function refreshKeyRate() {
+  const stored = await db.getMeta('keyRate');
+  const today10 = today();
+  if (stored && stored.checked === today10) return stored;
+  try {
+    const fresh = await moex.fetchKeyRate();
+    if (fresh && fresh.rate > 0) {
+      const rec = { rate: fresh.rate, date: fresh.date, source: 'ЦБ', checked: today10 };
+      await db.setMeta('keyRate', rec);
+      return rec;
+    }
+  } catch { /* ЦБ недоступен со страницы — останется ручное значение */ }
+  if (stored) { await db.setMeta('keyRate', { ...stored, checked: today10 }); }
+  return stored || null;
+}
+
 async function findIdeas(kind, filters = {}) {
   marketStage = 'связь с биржей';
   if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
@@ -5831,6 +6162,28 @@ async function findIdeas(kind, filters = {}) {
     marketYield: 0.08
   };
 
+  if (kind === 'hedge') {
+    // Защита. Фонды на золото — единственный доступный на бирже способ
+    // добрать этот класс: отдельных «защитных акций» не бывает.
+    marketStage = 'список фондов';
+    const funds = await moex.fetchAllFunds();
+    const gold = funds.filter(f => f.fundKind === 'gold')
+      .sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
+    const owned = new Set(ctx.ownedTickers);
+    marketStage = null;
+    return {
+      rows: gold.map(f => ({ ...f, kind: 'hedge',
+        score: owned.has(f.ticker) ? 60 : 70,
+        why: [owned.has(f.ticker) ? 'уже есть в портфеле — докупка не добавит новых рисков'
+                                  : 'новый фонд: сравнивать нужно комиссию управляющего',
+              f.turnover > 0 ? 'торгуется активно — продать можно быстро' : 'оборот сегодня мал'] })),
+      total: funds.length, ctx,
+      market: { onBoard: funds.length, checked: gold.length, paying: 0, best: null, nearMiss: [],
+                note: 'Фонды не платят дивидендов: доход только в цене пая. Комиссию управляющего '
+                    + 'биржа не публикует — её надо смотреть в правилах фонда, она уменьшает результат каждый год.' }
+    };
+  }
+
   if (kind === 'bonds') {
     marketStage = 'список облигаций';
     const rows = await moex.fetchAllBonds(filters.type ? [filters.type] : ['gov', 'corp']);
@@ -5844,7 +6197,7 @@ async function findIdeas(kind, filters = {}) {
   // укладывались в отведённое время на мобильной сети.
   const rough = reports.screenStocks(all, { ...filters, minYield: 0, minStreak: 0 }, ctx)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0))
-    .slice(0, 12);
+    .slice(0, 30);          // биржа отвечает за доли секунды — можно смотреть шире
   marketStage = 'истории выплат';
   const histories = await mapLimit(rough, 6, r => moex.fetchDividendHistory(r.ticker));
   rough.forEach((r, i) => {
@@ -5854,8 +6207,21 @@ async function findIdeas(kind, filters = {}) {
     r.yieldPct = reports.trailingYield(hist, r.price);
     r.lastPayout = hist.length ? hist[hist.length - 1] : null;
   });
+  // Разбор рынка. «Ничего не подошло» — отказ без вывода: человек не
+  // понимает, планка ли высока или рынок такой. Считаем картину: сколько
+  // проверено, сколько вообще платит и кто ближе всех к порогу.
+  const paying = rough.filter(r => (r.yieldPct || 0) > 0);
+  const nearMiss = [...paying]
+    .sort((a, b) => (b.yieldPct || 0) - (a.yieldPct || 0))
+    .slice(0, 3)
+    .map(r => ({ ticker: r.ticker, name: r.name, yieldPct: r.yieldPct, streak: r.streak || 0 }));
+
   marketStage = null;
-  return { rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx };
+  return {
+    rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx,
+    market: { onBoard: all.length, checked: rough.length, paying: paying.length,
+              best: nearMiss[0] || null, nearMiss }
+  };
 }
 
 /**
@@ -5877,6 +6243,21 @@ async function findReplacements() {
   const myStocks = owned.filter(p => allocationClass(p) === 'stocks');
 
   if (myBonds.length) {
+    // Денежный рынок как альтернатива облигациям: его доходность — это
+    // сегодняшняя ставка, величина известная и проверяемая.
+    marketStage = 'список фондов';
+    try {
+      const market = await marketContext();
+      const rate = market && market.moneyRate > 0 ? market.moneyRate / 100 : 0;
+      if (rate > 0) {
+        const funds = await moex.fetchAllFunds();
+        for (const f of funds.filter(x => x.fundKind === 'money')
+                             .sort((a, b) => (b.turnover || 0) - (a.turnover || 0)).slice(0, 3)) {
+          candidates.push({ ...f, kind: 'bond', ytm: rate, yearsLeft: 0 });
+        }
+      }
+    } catch { /* фонды не пришли — сравним только с облигациями */ }
+
     marketStage = 'список облигаций';
     const all = await moex.fetchAllBonds(['gov']);
     const mine = new Set(myBonds.map(p => p.ticker));
@@ -6043,7 +6424,7 @@ async function syncTinvest({ silent = false, force = false } = {}) {
 // buyRecommendations не переэкспортируем: он уже лежит в SH из advisor.js,
 // а обёртка «SH.x = (…) => SH.x(…)» затирала бы оригинал собой — прямой
 // путь в бесконечную рекурсию.
-return {mapLimit, lastMarketStage, probeExchange: (...a) => moex.probeExchange(...a),
+return {mapLimit, lastMarketStage, refreshKeyRate, probeExchange: (...a) => moex.probeExchange(...a),
         findIdeas, findReplacements, getSecurityDetails,
         syncTinvest, subscribe, getState, addOperation, removeOperation, setAveragePrice, setSetting, applySync, updatePrices, importTrades, resetAll, exportBackup, importBackup, init, explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, crashTest, valueChart, marketContext, rateMeaning};
 })());
@@ -6088,6 +6469,7 @@ const payoutsByMonth = SH.payoutsByMonth;
 const benchmarkCompare = SH.benchmarkCompare;
 const timeWeightedReturn = SH.timeWeightedReturn;
 const positionResult = SH.positionResult;
+const verdict = SH.verdict;
 const fetchIndexHistory = SH.fetchIndexHistory;
 const crashTest = SH.crashTest;
 const daysBetween = SH.daysBetween;
@@ -6636,7 +7018,10 @@ let ideaKind = 'bonds';
 let ideaResult = null;
 
 /** Отрисовка результатов отбора — отдельно, чтобы обновлять без перерисовки экрана. */
+let lastSwaps = [];      // последние найденные замены — для плана по нажатию
+
 function renderIdeas(res) {
+  if (res && res.swaps) lastSwaps = res.swaps;
   if (res.error) return `<div class="card"><div class="muted">${esc(res.error)}</div></div>`;
   if (res.swaps) {
     if (!res.swaps.length) return `<div class="card"><h3>Менять нечего</h3>
@@ -6644,17 +7029,47 @@ function renderIdeas(res) {
         комиссии за обмен. Проверено бумаг: ${res.checked}. Это хорошая новость: портфель не проигрывает рынку
         в том, что можно измерить.</div></div>`;
     return `<div class="card"><h3>Что можно поменять (${res.swaps.length})</h3>
-      ${res.swaps.map(x => `<div class="act info" style="margin-bottom:10px">
+      ${res.swaps.map((x, i) => `<div class="act info" style="margin-bottom:10px">
         <h2 style="font-size:16px">${esc(x.title)}</h2>
         <p>${esc(x.detail)}</p>
         <p class="muted" style="margin-top:8px">${esc(x.note)}</p>
+        <button class="btn wide" data-swap="${i}" style="margin-top:10px">Как сделать этот обмен</button>
       </div>`).join('')}
       <p class="muted" style="line-height:1.6">Приложение сделок не совершает и не может знать будущего.
         Это сравнение измеримого: доходность к погашению и прошлые выплаты. Проверено бумаг с рынка: ${res.checked}.</p>
     </div>`;
   }
   const rows = res.rows || [];
-  if (!rows.length) return `<div class="card"><div class="muted">Ничего не подошло под эти условия — смягчи их.</div></div>`;
+  if (!rows.length) {
+    const m = res.market;
+    if (!m) return `<div class="card"><div class="muted">Ничего не подошло под эти условия.</div></div>`;
+    const pct = v => `${(v * 100).toFixed(1)}%`;
+    const bondY = res.bondYtm > 0 ? res.bondYtm : null;
+    return `<div class="card">
+      <h3>Ни одна акция не прошла отбор</h3>
+      <div class="muted" style="line-height:1.65">
+        На бирже ${m.onBoard} акций. Проверены выплаты у ${m.checked} крупнейших —
+        платят хоть что-то ${m.paying}. Порог: выплаты за 12 месяцев от 6% и минимум 3 года подряд.
+      </div>
+      ${m.nearMiss.length ? `<div style="margin-top:10px">
+        <div class="muted" style="margin-bottom:6px">Ближе всех, но мимо порога:</div>
+        ${m.nearMiss.map(x => `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line)">
+          <span>${esc(x.name)}</span>
+          <span class="muted">${pct(x.yieldPct)}${x.streak ? ` · ${x.streak} ${x.streak < 5 ? 'года' : 'лет'} подряд` : ' · без серии выплат'}</span>
+        </div>`).join('')}
+      </div>` : ''}
+      <div class="muted" style="margin-top:10px;line-height:1.65">
+        ${bondY && m.best && bondY > m.best.yieldPct
+          ? `Это не про «акции плохие». Сейчас облигации платят ${pct(bondY)} к погашению — больше,
+             чем лучшая из проверенных акций (${pct(m.best.yieldPct)}), и без риска бизнеса. При высокой
+             ставке так и бывает: деньги дороги, и акции проигрывают в выплатах.`
+          : `Акции берут не только ради выплат: у них есть рост цены, который отбор не считает и предсказать
+             нельзя. Отсутствие подходящих по выплатам не значит, что акции невыгодны — значит, что по
+             ПРОВЕРЯЕМОМУ признаку сегодня никто не проходит.`}
+        Смягчать порог ради красивого списка приложение не станет: когда дело касается денег, мягкость дороже жёсткости.
+      </div>
+    </div>`;
+  }
   const rec = res.rec;
   const line = r => r.kind === 'bond'
     ? `${(r.ytm * 100).toFixed(1)}% к погашению · ${r.yearsLeft} лет · ${r.type === 'gov' ? 'ОФЗ' : 'корп.'}${
@@ -6841,6 +7256,19 @@ function viewSettings(st) {
       </div>
 
       <div class="rows" style="margin-top:10px">
+        <button class="rowitem" id="bKeyRate">
+          <span class="rt"><b>Ключевая ставка ЦБ</b><span>${(() => {
+            const k = st.settings.keyRate;
+            if (!k) return 'не задана — впиши, приложение сверяется с ней';
+            const days = Math.round((Date.now() - new Date(k.date).getTime()) / 86400000);
+            return `${(k.rate * 100).toFixed(2)}% от ${k.date.split('-').reverse().join('.')}`
+              + (days > 120 ? ' · старше четырёх месяцев, проверь' : '')
+              + (k.source === 'ЦБ' ? ' · от ЦБ' : ' · вписана вручную');
+          })()}</span></span>
+          <span class="chev"></span></button>
+        <button class="rowitem" id="bInstruments">
+          <span class="rt"><b>Что есть на бирже</b><span>Все виды инструментов: что для чего и что приложение оценивает</span></span>
+          <span class="chev"></span></button>
         <button class="rowitem" id="bWhatsNew">
           <span class="rt"><b>Что нового</b><span>Изменения этой сборки — сверь с отметкой на экране входа</span></span>
           <span class="chev"></span></button>
@@ -6921,6 +7349,8 @@ function bind(st) {
   on('bAddTrade', () => openForm('buy'));
   on('bAddDiv', () => openForm('dividend'));
   on('bAddRes', () => openForm('reserve'));
+  on('bKeyRate', openKeyRate);
+  on('bInstruments', openInstruments);
   on('bWhatsNew', openWhatsNew);
   on('bResults', openResults);
   on('bPolicy', openPolicy);
@@ -7009,7 +7439,8 @@ async function drawMarket() {
         ${m.imoex ? `<div><div class="muted" style="font-size:11px">Индекс Мосбиржи</div>
           <div style="font-size:20px;font-weight:750">${Math.round(m.imoex).toLocaleString('ru-RU')}</div>
           ${m.monthChange != null ? `<div style="font-size:12px;font-weight:650" class="${m.monthChange >= 0 ? 'up' : 'down'}">${m.monthChange >= 0 ? '+' : '−'}${Math.abs(m.monthChange * 100).toFixed(1)}% за месяц</div>` : ''}</div>` : ''}
-        ${m.moneyRate ? `<div><div class="muted" style="font-size:11px">Ставка денежного рынка</div>
+        ${m.moneyRate ? `<div><div class="muted" style="font-size:11px">Ставка денежного рынка${
+          m.moneyRateSource ? ` · ${esc(m.moneyRateSource)}` : ''}</div>
           <div style="font-size:20px;font-weight:750">${m.moneyRate}%</div></div>` : ''}
       </div>
       ${meaning ? `<div class="muted" style="line-height:1.6">${esc(meaning.text)}</div>` : ''}`;
@@ -7518,6 +7949,27 @@ async function openPlan() {
           : `<br><br>Посчитано по ценам на ${when}.`;
       })()}</p>
 
+    <div id="verdictBox">${(() => {
+      const v = verdict(st, {
+        contribution: contributionPlan(st, flow),
+        moneyRate: market.moneyRate > 0 ? market.moneyRate / 100 : 0,
+        rateSource: market.moneyRateSource || null,
+        yearDeposits: st.yearDeposits || 0
+      });
+      if (!v) return '';
+      return `<div class="act attention" style="margin-bottom:12px">
+        <div class="tag">Вердикт</div>
+        <h2 style="font-size:17px;margin-bottom:8px">Что делать по порядку</h2>
+        ${v.steps.map((x, i) => `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
+          <div style="font-weight:650;line-height:1.5">${i + 1}. ${esc(x.what)}</div>
+          <div class="muted" style="margin-top:4px;line-height:1.6">${esc(x.why)}</div>
+        ${x.how ? `<div style="margin-top:6px">${x.how.map((h, k) => `<div class="muted" style="line-height:1.55;padding:2px 0;opacity:.9">— ${esc(h)}</div>`).join('')}</div>` : ''}
+        </div>`).join('')}
+        <p style="margin-top:10px;line-height:1.65">${esc(v.plan)}</p>
+        <p class="muted" style="margin-top:8px;line-height:1.65">${esc(v.caution)}</p>
+      </div>`;
+    })()}</div>
+
     ${(() => {
       const yo = yearOutlook(st.summary.byClass, st.summary.securities, 0,
         store.ratesFor(st.settings.bondYtm || 0).rates);
@@ -7610,7 +8062,11 @@ async function openPlan() {
     : { stocks: 0, bonds: 0 };
   const gapStocks = (st.targets.stocks || 0) - shares.stocks;
   const gapBonds = (st.targets.bonds || 0) - shares.bonds;
-  const kind = gapBonds >= gapStocks ? 'bonds' : 'stocks';
+  const gapHedge = (st.targets.hedge || 0) - shares.hedge;
+  // Раньше защита пропускалась: «у золота нет ни выплат, ни срока». Но
+  // именно её чаще всего и не хватает, а купить её можно — фондами.
+  const kind = gapHedge >= gapBonds && gapHedge >= gapStocks ? 'hedge'
+             : gapBonds >= gapStocks ? 'bonds' : 'stocks';
 
   async function fillMarketIdeas() {
     const box = $('ideasOut');
@@ -7618,7 +8074,8 @@ async function openPlan() {
     try {
       const goalYears = Number(st.settings.goal?.years) || 0;
       const rate = await marketRate();
-      const filters = kind === 'bonds'
+      const filters = kind === 'hedge' ? {}
+        : kind === 'bonds'
         ? { minYTM: Math.max(0.10, rate - 0.01), maxYears: goalYears || 5 }
         : { minYield: 0.06, minStreak: 3 };
       const res = await withLimit(store.findIdeas(kind, filters), 45, null);
@@ -7635,8 +8092,12 @@ async function openPlan() {
         return;
       }
       const st2 = await store.getState();
-      ideaResult = { rows: res.rows, rec: SH.buyRecommendations(st2, res.rows),
-        criteria: kind === 'bonds'
+      ideaResult = { rows: res.rows, market: res.market,
+        bondYtm: Number(st2.settings.bondYtm) || 0,
+        rec: SH.buyRecommendations(st2, res.rows),
+        criteria: kind === 'hedge'
+          ? `Искал защиту: фонды на золото — их не хватает сильнее всего (${(shares.hedge * 100).toFixed(1)}% при цели ${((st.targets.hedge || 0) * 100).toFixed(0)}%). Золото дорожает, когда дешевеют акции; выплат оно не приносит.`
+          : kind === 'bonds'
           ? `Искал облигации: доходность к погашению от ${(filters.minYTM * 100).toFixed(1)}% (ориентир — денежный рынок) и погашение не позже ${filters.maxYears} лет, до твоей цели. Их не хватает сильнее всего.`
           : `Искал акции: выплаты за 12 месяцев от 6% и минимум 3 года подряд. Их не хватает сильнее всего.` };
       box.innerHTML = renderIdeas(ideaResult);
@@ -7663,6 +8124,34 @@ async function openPlan() {
       }
       box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
       bindIdeaButtons();
+
+      // Вердикт составлен до ответа биржи. Появилась выгодная замена —
+      // пересобираем его, чтобы совет был один и полный, а не в двух местах.
+      if (r.ideas && r.ideas.length) {
+        const vb = $('verdictBox');
+        if (vb) {
+          const stNow = await store.getState();
+          const mk = await withLimit(store.marketContext(), 4, {}) || {};
+          const v = verdict(stNow, {
+            contribution: contributionPlan(stNow, await portfolioFacts()),
+            moneyRate: mk.moneyRate > 0 ? mk.moneyRate / 100 : 0,
+            rateSource: mk.moneyRateSource || null,
+            yearDeposits: stNow.yearDeposits || 0,
+            swap: r.ideas[0]
+          });
+          if (v) vb.innerHTML = `<div class="act attention" style="margin-bottom:12px">
+            <div class="tag">Вердикт</div>
+            <h2 style="font-size:17px;margin-bottom:8px">Что делать по порядку</h2>
+            ${v.steps.map((x, i) => `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
+              <div style="font-weight:650;line-height:1.5">${i + 1}. ${esc(x.what)}</div>
+              <div class="muted" style="margin-top:4px;line-height:1.6">${esc(x.why)}</div>
+            ${x.how ? `<div style="margin-top:6px">${x.how.map((h, k) => `<div class="muted" style="line-height:1.55;padding:2px 0;opacity:.9">— ${esc(h)}</div>`).join('')}</div>` : ''}
+        </div>`).join('')}
+            <p style="margin-top:10px;line-height:1.65">${esc(v.plan)}</p>
+            <p class="muted" style="margin-top:8px;line-height:1.65">${esc(v.caution)}</p>
+          </div>`;
+        }
+      }
     } catch (err) {
       box.innerHTML = `<div class="muted">Сравнение с рынком не удалось: ${esc(err.message || String(err))}</div>`;
     }
@@ -7681,6 +8170,131 @@ async function openPlan() {
     await store.setSetting('plannedThisMonth', { month, amount });
     openPlan();   // пересчитать и показать заново с новой суммой
   };
+}
+
+/**
+ * Ключевая ставка: пробуем взять у ЦБ, иначе принимаем от человека.
+ * Подсовывать вместо неё ставку денежного рынка приложение не станет —
+ * это разные числа, и решения на них строятся разные.
+ */
+async function openKeyRate() {
+  const st = await store.getState();
+  const k = st.settings.keyRate;
+  openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Ключевая ставка ЦБ</h2>
+    <p class="muted" style="margin:0 0 12px;line-height:1.6">Биржа её не публикует: RUSFAR и RUONIA —
+      ставки денежного рынка, близкие, но другие. Приложение пробует получить ставку у Банка России;
+      если браузер не пустит запрос на чужой сайт, впиши её сюда — это займёт десять секунд,
+      а меняется она несколько раз в год.</p>
+
+    ${k ? `<div class="diff">Сейчас: <b>${(k.rate * 100).toFixed(2)}%</b> от ${k.date.split('-').reverse().join('.')}
+      · ${k.source === 'ЦБ' ? 'получена от ЦБ' : 'вписана вручную'}</div>` : ''}
+
+    <label>Ключевая ставка, %</label>
+    <input type="number" id="fKeyRate" inputmode="decimal" step="0.25" value="${k ? (k.rate * 100).toFixed(2) : ''}" placeholder="например, 16.5">
+    <label>С какой даты действует</label>
+    <input type="date" id="fKeyRateDate" value="${k ? k.date : new Date().toISOString().slice(0, 10)}">
+
+    <button class="btn wide" id="bKeyRateSave" style="margin-top:12px">Сохранить</button>
+    <button class="btn ghost wide" id="bKeyRateFetch" style="margin-top:8px">Попробовать взять у ЦБ</button>
+    <div id="keyRateOut"></div>
+
+    <p class="muted" style="margin-top:12px;line-height:1.6">Посмотреть текущее значение можно на сайте
+      Банка России — раздел «Ключевая ставка». Приложение не станет подставлять вместо неё похожее число:
+      на ключевой строятся решения о вкладах и облигациях, и ошибка здесь дороже пустого поля.</p>`);
+
+  const save = $('bKeyRateSave');
+  if (save) save.onclick = async () => {
+    const value = Number($('fKeyRate').value);
+    const date = $('fKeyRateDate').value || new Date().toISOString().slice(0, 10);
+    if (!(value > 0 && value < 100)) { $('fKeyRate').focus(); return alert('Ставка должна быть от 0 до 100%'); }
+    await store.setMeta('keyRate', { rate: value / 100, date, source: 'вручную', checked: null });
+    closeSheet(); render();
+  };
+
+  const fetchBtn = $('bKeyRateFetch');
+  if (fetchBtn) fetchBtn.onclick = async () => {
+    const out = $('keyRateOut');
+    out.innerHTML = '<div class="muted" style="margin-top:10px">Спрашиваю Банк России…</div>';
+    const r = await withLimit(store.refreshKeyRate(), 12, null);
+    out.innerHTML = r && r.source === 'ЦБ'
+      ? `<div class="muted" style="margin-top:10px">Получено от ЦБ: <b>${(r.rate * 100).toFixed(2)}%</b> от ${r.date}.</div>`
+      : `<div class="muted" style="margin-top:10px">Банк России не ответил странице — это ограничение браузера,
+         а не сбой ставки. Впиши значение вручную: оно сохранится и будет использоваться в расчётах.</div>`;
+  };
+}
+openKeyRate = guardSheet(openKeyRate);
+
+/**
+ * Справочник инструментов. Нужен потому, что нельзя выбрать то, о чём не
+ * знаешь: человек не обязан помнить, что на бирже есть линкеры или денежный
+ * рынок. Здесь всё, что торгуется, — и честно сказано, что приложение
+ * оценивает, чего не умеет и чего не берёт принципиально.
+ */
+function openInstruments() {
+  const block = (title, what, forWhat, app) => `<div style="padding:11px 0;border-bottom:1px solid var(--line)">
+    <div style="font-weight:700;font-size:14px;margin-bottom:4px">${title}</div>
+    <div class="muted" style="line-height:1.65">${what}</div>
+    <div class="muted" style="line-height:1.65;margin-top:4px"><b>Зачем:</b> ${forWhat}</div>
+    <div class="muted" style="line-height:1.65;margin-top:4px;opacity:.85"><b>Штурвал:</b> ${app}</div>
+  </div>`;
+
+  openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Что есть на бирже</h2>
+    <p class="muted" style="margin:0 0 12px;line-height:1.6">Полный список того, что можно купить на ИИС,
+      и что из этого приложение умеет оценивать числом. Выбрать нельзя то, о чём не знаешь.</p>
+
+    ${block('Акции',
+      'Доля в компании. Доход двух видов: дивиденды (решение компании, могут отменить) и рост цены.',
+      'Главный двигатель роста на длинном сроке — и главный источник просадок.',
+      'Оценивает по фактическим выплатам за 12 месяцев и годам подряд. Рост цены не предсказывает принципиально.')}
+
+    ${block('Облигации с постоянным купоном',
+      'Долг эмитента с известным купоном и датой погашения.',
+      'Предсказуемый доход и якорь портфеля: платят независимо от настроения рынка.',
+      'Оценивает по доходности к погашению и сроку; предупреждает про оферты и про срок длиннее цели.')}
+
+    ${block('Облигации с плавающим купоном (флоатеры, ПК)',
+      'Купон привязан к ключевой ставке или RUONIA и меняется вслед за ней.',
+      'Защита от роста ставки: когда обычные облигации дешевеют, эти держат цену.',
+      'Находит и помечает: «купон привязан к ставке — падает вместе с ней».')}
+
+    ${block('Облигации с индексируемым номиналом (линкеры, ОФЗ-ИН)',
+      'Тело долга растёт вместе с инфляцией, купон считается от выросшего номинала.',
+      'Единственная прямая защита от инфляции. Доходность у них означает доход СВЕРХ инфляции.',
+      'Находит, помечает и учитывает в оценке: их 3% — это не мало, это 3% плюс инфляция.')}
+
+    ${block('Биржевые фонды (БПИФ, ETF)',
+      'Корзина бумаг одним паем: золото, денежный рынок, облигации, индекс акций.',
+      'Способ купить целый класс активов сразу — особенно защиту и деньги под ставку.',
+      'Находит и различает по назначению. Комиссию управляющего биржа не публикует — приложение о ней молчит и отправляет в правила фонда.')}
+
+    ${block('Денежный рынок (фонды ликвидности)',
+      'Деньги, размещённые под ставку овернайт, паем на бирже.',
+      'Место для денег, которые скоро понадобятся: без срока, без падения цены при росте ставки.',
+      'Сравнивает с твоими облигациями: если те платят меньше ставки, скажет об этом прямо.')}
+
+    ${block('Золото и другие металлы',
+      'На бирже доступны и фондом, и напрямую (в граммах, с расчётами в рублях).',
+      'Защита: дорожает, когда дешевеют акции. Выплат не приносит.',
+      'Оценивает как класс «защита». Прямую покупку металла не разбирает: у неё другие правила хранения и спреды.')}
+
+    ${block('Валюта и валютные облигации',
+      'Юань на бирже; замещающие облигации российских компаний с расчётами в рублях по курсу.',
+      'Защита от ослабления рубля.',
+      'Пока не оценивает: нужен курс и правила пересчёта, а без них любые числа были бы выдумкой. Кандидат на следующий шаг.')}
+
+    ${block('Фьючерсы и опционы',
+      'Срочные контракты с плечом: можно потерять больше, чем вложил.',
+      'Спекуляции и хеджирование крупных позиций профессионалами.',
+      'НЕ БЕРЁТ СОЗНАТЕЛЬНО. Это не осторожность, а арифметика: плечо превращает обычную просадку в потерю всего капитала, а цель — накопить, а не отыграться.')}
+
+    ${block('Структурные продукты, ИСЖ, ноты',
+      'Сложные обёртки с условной доходностью и скрытыми комиссиями.',
+      'Продаются как «защита капитала с участием в росте».',
+      'НЕ БЕРЁТ СОЗНАТЕЛЬНО. Их доходность нельзя проверить числом до покупки — а всё, что приложение советует, обязано быть проверяемым.')}
+
+    <p class="muted" style="margin-top:14px;line-height:1.65">Чего приложение не умеет ни для одного инструмента:
+      предсказывать цены, читать новости и отчётность, оценивать качество бизнеса. Оно считает только то,
+      что можно проверить: выплаты, сроки, доходности, доли и комиссии.</p>`);
 }
 
 /**
@@ -7710,6 +8324,16 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('План конкретного обмена', 'Нажми «Как сделать этот обмен» — и получишь план с твоими числами: сколько штук продать и по какой цене не ниже, сколько купить, что останется, во что обойдутся комиссии.')}
+    ${item('Ключевая ставка — отдельно и честно', '«Ещё» → «Ключевая ставка ЦБ»: приложение пробует взять её у Банка России, а если браузер не пустит — принимает от тебя, с датой и напоминанием, когда пора проверить. Подменять её ставкой денежного рынка оно не станет.')}
+    ${item('Инструкция к каждой замене', 'Совет поменять бумагу теперь идёт с порядком исполнения: обе сделки в один день, лимитная заявка, не в первые и последние 10 минут торгов, что с накопленным купоном и что продажа фиксирует результат.')}
+    ${item('Ставка названа точно', 'Приложение показывает ставку денежного рынка (RUSFAR) и прямо говорит, что она близка к ключевой, но не равна ей.')}
+    ${item('Вердикт — первым делом', 'В «Что стоит сделать» сверху появился связный ответ: что делать по порядку, сколько это даёт в рублях и почему именно так — от цели и бюджета, а не от отдельной бумаги. Когда подгружаются замены, вердикт пересобирается с ними.')}
+    ${item('Справочник инструментов', '«Ещё» → «Что есть на бирже»: все классы — акции, три вида облигаций, фонды, денежный рынок, золото, валюта — что для чего, что приложение оценивает и от чего отказывается сознательно (плечо, структурные продукты).')}
+    ${item('Три разных «облигации»', 'Постоянный купон, флоатер и линкер — разные инструменты. У линкера доходность означает доход СВЕРХ инфляции, и приложение теперь это говорит, а не сравнивает их вслепую.')}
+    ${item('Фонды — третий класс инструментов', 'Приложение видит биржевые фонды: золото для защиты и денежный рынок как альтернативу облигациям. Защита больше не пропускается в поиске — именно её у тебя не хватает сильнее всего.')}
+    ${item('Облигация против денежного рынка', 'Если твоя облигация платит меньше сегодняшней ставки, это видно: денежный рынок даёт больше, без срока и без падения цены при росте ставки — с честной оговоркой, что ставка не зафиксирована.')}
+    ${item('Разбор рынка вместо отказа', 'Если ни одна акция не прошла отбор, приложение объясняет почему: сколько акций на бирже, сколько проверено, сколько вообще платит, кто был ближе всех и не выигрывают ли сейчас облигации.')}
     ${item('Журнал защищён от полуимён', 'Если брокер не назвал имена части бумаг, журнал не переписывается вовсе: иначе половина сделок легла бы под техническим кодом и сверка ругалась бы вечно.')}
     ${item('Обновление доходит и до установленного приложения', 'Старый обработчик офлайн-режима снимается перед перезагрузкой — раньше он продолжал отдавать прежнюю копию, и приходилось заходить через браузер.')}
     ${item('Поиск по рынку наконец работает', 'Причина была не в бирже и не в сети: в коде не хватало одного объявления, и каждый запрос падал молча. Разделы «Что можно купить» и «Что можно поменять» теперь заполняются.')}
@@ -7730,7 +8354,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 154 автоматические проверки и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 164 автоматические проверки и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
@@ -7843,7 +8467,69 @@ function bindIdeaButtons() {
   document.querySelectorAll('[data-idea]').forEach(b => {
     b.onclick = () => openIdeaDetails(b.getAttribute('data-idea'));
   });
+  document.querySelectorAll('[data-swap]').forEach(b => {
+    b.onclick = () => openSwapPlan(Number(b.getAttribute('data-swap')));
+  });
 }
+
+/**
+ * Пошаговый план конкретного обмена: с твоими количествами, ценами и
+ * границами, за которыми обмен перестаёт окупаться.
+ */
+async function openSwapPlan(index) {
+  const idea = lastSwaps[index];
+  if (!idea) return;
+  openSheet('<div class="muted">Считаю план обмена…</div>');
+
+  const st = await store.getState();
+  // Цена и лот новой бумаги — с биржи; без них план был бы гаданием.
+  let buyPrice = 0, buyLot = 1, toName = idea.to;
+  const d = await withLimit(store.getSecurityDetails(idea.to), 10, null);
+  if (d && d.facts) {
+    buyPrice = Number(d.facts.price) || 0;
+    toName = d.facts.name || idea.to;
+  }
+  const plan = SH.swapPlan(st, idea, { buyPrice, buyLot, toName });
+  if (!plan) { openSheet('<div class="muted">Не получилось собрать план: бумага не найдена в портфеле.</div>'); return; }
+
+  const step = (n, title, body) => `<div style="padding:11px 0;border-bottom:1px solid var(--line)">
+    <div style="font-weight:700;font-size:14px;margin-bottom:4px">${n}. ${title}</div>
+    <div class="muted" style="line-height:1.65">${body}</div></div>`;
+
+  openSheet(`<h2 style="margin:0 0 4px;font-size:19px">${esc(plan.fromName)} → ${esc(plan.toName)}</h2>
+    <p class="muted" style="margin:0 0 12px;line-height:1.6">Числа — оценка по последней известной цене.
+      В момент сделки цена будет другой, поэтому ниже названы границы, за которыми обмен перестаёт окупаться.</p>
+
+    ${step(1, `Продать ${plan.sellQty} шт ${esc(plan.fromName)}`,
+      `Лимитная заявка, цена <b>не ниже ${plan.minSell.toFixed(2)} ₽</b> (сейчас ${plan.sellPrice.toFixed(2)} ₽).
+       Ниже этой границы теряется больше, чем даёт обмен за год.
+       Выручка после комиссии — примерно <b>${money(plan.proceeds)}</b>.`)}
+
+    ${plan.incomplete
+      ? step(2, `Купить ${esc(plan.toName)}`,
+          `Цену новой бумаги биржа сейчас не отдала, поэтому количество не посчитано.
+           Возьми в приложении брокера цену ${esc(plan.to)} и купи на <b>${money(plan.proceeds)}</b> —
+           лимитной заявкой, не выше цены в стакане.`)
+      : step(2, `Купить ${plan.buyQty} шт ${esc(plan.toName)}`,
+          `Лимитная заявка, цена <b>не выше ${plan.maxBuy.toFixed(2)} ₽</b> (сейчас ${plan.buyPrice.toFixed(2)} ₽).
+           На это уйдёт около <b>${money(plan.spent)}</b>${plan.buyLot > 1 ? ` (${plan.lots} лот. по ${plan.buyLot})` : ''},
+           останется <b>${money(plan.leftover)}</b> — их можно добавить к следующему взносу.`)}
+
+    ${step(3, 'Сделать обе сделки подряд, в один день',
+      `Разрыв в день-два — риск, что новая бумага подорожает и выгода обмена исчезнет.
+       Не в первые и не в последние 10 минут торгов: там разброс цен шире всего.`)}
+
+    ${step(4, 'Проверить итог',
+      `Комиссии за обе сделки — около <b>${money(plan.feeTotal)}</b>, ожидаемая выгода —
+       <b>${money(plan.gain)}</b> в год. Если после сделок в портфеле осталось меньше бумаг, чем задумано,
+       или деньги зависли — загляни в «Ещё» → «Диагностика»: там видно, что говорит брокер.`)}
+
+    <p class="muted" style="margin-top:12px;line-height:1.65">${esc(idea.note)}</p>
+    <p class="muted" style="margin-top:8px;line-height:1.65;opacity:.8">Приложение сделок не совершает —
+      всё делается в приложении брокера. И оно не знает будущих цен: выгода посчитана из доходности к
+      погашению и прошлых выплат, а не из прогноза.</p>`);
+}
+openSwapPlan = guardSheet(openSwapPlan);
 
 /**
  * Карточка любой бумаги с рынка — не только своей. Показывает то же,
