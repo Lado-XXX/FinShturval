@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-03c</title>
+<title>Штурвал · 2026-08-03e</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-03c';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03e';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -1920,6 +1920,13 @@ function replacementIdeas(state, candidates = [], opts = {}) {
         if (!best || gain > best.gain) best = { c, gain, kind: 'bonds' };
       } else {
         if (!(c.yieldPct > 0) || mine.yieldPct == null) continue;
+        // ЗАМОЛЧАВШИЙ ПЛАТЕЛЬЩИК. Серия «платит 3 года подряд» считается по
+        // годам, в которые выплаты были, и живёт ещё долго после того, как
+        // компания платить перестала. Полюс отказался от дивидендов до 2030
+        // года — а серия у него всё ещё три года, и по ней приложение звало
+        // продавать свои бумаги. Больше года без выплат — это уже не «платит»,
+        // и звать на такую бумагу нельзя, какой бы ни была прошлая доходность.
+        if (c.payoutAgeDays != null && c.payoutAgeDays > 400) continue;
         // Бумага, про выплаты которой известно, что данные негодны, не
         // может быть поводом продать свою. Совет обязан опираться на
         // проверенное — а здесь проверка как раз не прошла.
@@ -2003,7 +2010,11 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
       title: `${p.name} → ${best.c.name}`,
       detail: `Выплаты за 12 месяцев по данным биржи, до налога: ${((mine.yieldPct || 0) * 100).toFixed(1)}% против ${(best.c.yieldPct * 100).toFixed(1)}%, `
-        + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд. На позиции в ${rub(value)} `
+        + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд`
+        + (best.c.payoutLastDate
+          ? ` — последняя выплата ${String(best.c.payoutLastDate).split('-').reverse().join('.')}`
+          : '')
+        + `. На позиции в ${rub(value)} `
         + `разница — около ${rub(best.gain)} в год чистыми, комиссии обмена ${rub(cost)}.`,
       note: `Это наблюдение о прошлых выплатах, а не совет продавать: дивиденды — решение компании и могут быть урезаны. `
         + `Если бумага бралась ради роста бизнеса, низкие выплаты не изъян. Замена меняет и риск: чужой бизнес ты знаешь хуже.`
@@ -6922,6 +6933,10 @@ async function findReplacements() {
                         yieldPct: detail ? detail.yieldPct : null,
                         yieldSuspect: detail ? detail.suspect : null,
                         payouts: detail ? detail.payouts : 0,
+                        // Свежесть выплат едет вместе с их размером: «платит N лет
+                        // подряд» без даты последней выплаты — половина правды.
+                        payoutAgeDays: detail ? detail.ageDays : null,
+                        payoutLastDate: detail ? detail.lastDate : null,
                         streak: R2.payoutStreak(hist) });
     });
   }
@@ -6968,7 +6983,12 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   // шагами всё оборвётся — вкладку закрыли, база упала — копия в памяти
   // погибнет вместе со страницей. Поэтому она кладётся в само хранилище
   // и забирается оттуда при следующем запуске, если пересборка не дожила.
-  await db.setMeta('journalBackup', { at: Date.now(), ops: before });
+  //
+  // Кладётся ПОСЛЕ разговора с брокером, а не до. Раньше копия появлялась
+  // первой строкой, и обычный обрыв связи выглядел при следующем запуске
+  // как «обновление оборвалось на середине, журнал восстановлен из копии» —
+  // хотя журнала никто не касался. Ложная тревога о порче данных стоит
+  // дороже, чем кажется: ей перестают верить и тогда, когда она настоящая.
   let ops, book;
   try {
     // Сначала портфель: он пополняет запас имён, которым потом пользуются
@@ -6978,14 +6998,15 @@ async function syncTinvest({ silent = false, force = false } = {}) {
       await db.setMeta('uidTickers', { ...((await db.getMeta('uidTickers')) || {}), ...book.resolved });
     }
     ops = await tiOperations(token, accountId, '2000-01-01', (await db.getMeta('uidTickers')) || {});
-    if (false) {
-      await db.setMeta('uidTickers', { ...((await db.getMeta('uidTickers')) || {}), ...book.resolved });
-    }
   } catch (err) {
     await db.setMeta('tiLastError', { at: Date.now(), message: err.message || String(err) });
+    // Журнала не касались — сообщать не о чем, кроме самой связи.
+    await db.setMeta('journalBackup', null);
     throw err;
   }
   await db.setMeta('tiLastError', null);
+  // Дальше начинается запись. Вот теперь копия нужна.
+  await db.setMeta('journalBackup', { at: Date.now(), ops: before });
 
   // Брокер не назвал имена части бумаг — в ответе остались технические коды.
   // Записать такой журнал значит испортить данные: половина сделок ляжет
@@ -7000,14 +7021,6 @@ async function syncTinvest({ silent = false, force = false } = {}) {
     await db.setMeta('tiProblem', [msg]);
     if (!silent) notify();
     return { ok: false, problems: [msg], unresolved: missing };
-  }
-
-  if (false) {
-    await db.setMeta('journalBackup', null);
-    const msg = `Брокер не назвал ${book.unresolved} ${book.unresolved === 1 ? 'бумагу' : 'бумаги'} — `
-      + `журнал не тронут, чтобы не смешать имена с техническими кодами. Обнови ещё раз.`;
-    await db.setMeta('tiProblem', [msg]);
-    return { ok: false, problems: [msg], unresolved: book.unresolved };
   }
 
   const draft = [];
@@ -8881,31 +8894,6 @@ async function openPlan() {
           Замен, которые окупали бы комиссии, на рынке сейчас нет — это тоже ответ.</div>`;
       }
 
-      if (false) {
-        const vb = $('verdictBox');
-        if (vb) {
-          const stNow = await store.getState();
-          const mk = await withLimit(store.marketContext(), 4, {}) || {};
-          const v = verdict(stNow, {
-            contribution: contributionPlan(stNow, await portfolioFacts()),
-            moneyRate: mk.moneyRate > 0 ? mk.moneyRate / 100 : 0,
-            rateSource: mk.moneyRateSource || null,
-            yearDeposits: stNow.yearDeposits || 0,
-            swap: r.ideas[0]
-          });
-          if (v) vb.innerHTML = `<div class="act attention" style="margin-bottom:12px">
-            <div class="tag">Вердикт</div>
-            <h2 style="font-size:17px;margin-bottom:8px">Что делать по порядку</h2>
-            ${v.steps.map((x, i) => `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
-              <div style="font-weight:650;line-height:1.5">${i + 1}. ${esc(x.what)}</div>
-              <div class="muted" style="margin-top:4px;line-height:1.6">${esc(x.why)}</div>
-            ${x.how ? `<div style="margin-top:6px">${x.how.map((h, k) => `<div class="muted" style="line-height:1.55;padding:2px 0;opacity:.9">— ${esc(h)}</div>`).join('')}</div>` : ''}
-        </div>`).join('')}
-            <p style="margin-top:10px;line-height:1.65">${esc(v.plan)}</p>
-            <p class="muted" style="margin-top:8px;line-height:1.65">${esc(v.caution)}</p>
-          </div>`;
-        }
-      }
     } catch (err) {
       box.innerHTML = `<div class="muted">Сравнение с рынком не удалось: ${esc(err.message || String(err))}</div>`;
     }
@@ -9072,6 +9060,7 @@ function openWhatsNew() {
     ${item('Дробление акций больше не раздувает доходность', 'Биржа хранит старые дивиденды в прежнем масштабе: у Полюса до сплита 1:10 выплата была 1301,75 ₽ на акцию, после — 73 ₽. Сложенные вместе и делённые на нынешнюю цену, они давали «105,5% выплат за год», и приложение предлагало обменять на Полюс четыре бумаги из пяти. Теперь такой обрыв ряда виден, старые выплаты отбрасываются, а доходность выше 40% считается испорченными данными и в советы не идёт.')}
     ${item('Ноль и «неизвестно» разведены', 'Если биржа промолчала о выплатах твоей бумаги, это больше не «выплат ноль»: обмен по такой бумаге не предлагается вовсе. Раньше молчание раздувало выгоду обмена на всю доходность чужой бумаги.')}
     ${item('Плавающий купон не выдаётся за прибавку', 'Доходность к погашению флоатера держится ровно до следующего решения ЦБ по ставке. Сравнивать её с бумагой постоянного купона и называть разницу выгодой нельзя — такие замены больше не предлагаются.')}
+    ${item('Серия выплат больше не переживает саму компанию', '«Платит 3 года подряд» считается по годам, в которые выплаты были, и держится ещё долго после того, как компания платить перестала — у Полюса, отказавшегося от дивидендов до 2030 года, серия всё ещё три года. Бумага без выплат больше года на обмен не зовёт, а рядом с серией теперь стоит дата последней выплаты.')}
     ${item('У каждого процента выплат названа база', 'На одном экране стояли 18,8% и 16,5% по МТС, и оба верны: биржа отдаёт дивиденд до налога, а карточки твоего портфеля считают то, что дошло до счёта. Теперь это написано там, где числа показываются, — чтобы не выглядело расхождением.')}
     ${item('Пятёрка лидеров — не ставка на одну отрасль', 'Когда сектору хорошо, хорошо сразу всем его бумагам: в «что подходит портфелю» выходило четыре нефтегаза из пяти с одинаковой оценкой. Теперь бумаг одной отрасли в этом списке не больше двух, а бумага из отрасли, которая в портфеле уже у предела 35%, получает штраф к оценке.')}
     ${item('Вердикт не спорит сам с собой', 'Шаг «делить взнос пополам» и план размещения взноса теперь согласованы: если половина идёт в резерв, план прямо говорит, сколько остаётся бумагам.')}
