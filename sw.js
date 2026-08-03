@@ -36,7 +36,11 @@ self.addEventListener('fetch', event => {
 
   event.respondWith((async () => {
     try {
-      const fresh = await fetch(req);
+      // Саму страницу приложения просим строго из сети и без кэша браузера:
+      // именно на ней держалась старая сборка в установленном приложении.
+      const isPage = req.mode === 'navigate' || url.pathname.endsWith('/')
+        || url.pathname.endsWith('index.html');
+      const fresh = await fetch(isPage ? new Request(req, { cache: 'reload' }) : req);
       const cache = await caches.open(CACHE);
       cache.put(req, fresh.clone());
       return fresh;

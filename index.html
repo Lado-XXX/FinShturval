@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30ay</title>
+<title>Штурвал · 2026-07-30az</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30ay';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30az';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -7791,10 +7791,31 @@ async function openDiagnostics() {
     ${compare}
 
     <div style="height:16px"></div>
+    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)">
+      <span class="muted">сборка на сервере</span>
+      <span id="serverBuild">проверяю…</span>
+    </div>
+    <button class="btn ghost wide" id="bForceUpdate" style="margin:10px 0">Обновить приложение сейчас</button>
     <button class="btn ghost wide" id="bProbe" style="margin-bottom:10px">Проверить доступ к бирже</button>
     <div id="probeOut"></div>
     <button class="btn wide" id="bDiagSync">Собрать журнал заново</button>
     <div id="bDiagOut"></div>`);
+
+  // Что лежит на сервере — сразу, без ожидания действий человека.
+  async function showServerBuild() {
+    const cell = $('serverBuild');
+    if (!cell) return;
+    const seen = await checkForUpdate(false);   // только посмотреть, не перезагружаться
+    cell.innerHTML = seen.server
+      ? (seen.server === BUILD
+          ? `${esc(seen.server)} — совпадает`
+          : `<span style="color:var(--warn)">${esc(seen.server)} — новее, нажми «Обновить»</span>`)
+      : `<span style="color:var(--danger)">${esc(seen.error || 'не удалось узнать')}</span>`;
+  }
+  showServerBuild();
+
+  const force = $('bForceUpdate');
+  if (force) force.onclick = () => forceUpdate();
 
   const probe = $('bProbe');
   if (probe) probe.onclick = async () => {
@@ -8324,6 +8345,7 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Обновление стало видимым', 'В «Диагностике» теперь показано, какая сборка лежит на сервере, и есть кнопка «Обновить приложение сейчас» — она пробивает все копии. Служебный файл офлайн-режима больше не кэширует саму страницу.')}
     ${item('План конкретного обмена', 'Нажми «Как сделать этот обмен» — и получишь план с твоими числами: сколько штук продать и по какой цене не ниже, сколько купить, что останется, во что обойдутся комиссии.')}
     ${item('Ключевая ставка — отдельно и честно', '«Ещё» → «Ключевая ставка ЦБ»: приложение пробует взять её у Банка России, а если браузер не пустит — принимает от тебя, с датой и напоминанием, когда пора проверить. Подменять её ставкой денежного рынка оно не станет.')}
     ${item('Инструкция к каждой замене', 'Совет поменять бумагу теперь идёт с порядком исполнения: обе сделки в один день, лимитная заявка, не в первые и последние 10 минут торгов, что с накопленным купоном и что продажа фиксирует результат.')}
@@ -9336,14 +9358,30 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
  * сами: если там лежит другая отметка сборки — перезагружаемся один раз,
  * минуя все копии. Данные при этом не трогаются: они в базе, а не в файле.
  */
-async function checkForUpdate() {
-  if (!location.protocol.startsWith('http')) return;
+// Что показала последняя проверка обновления — видно в диагностике.
+// Раньше проверка молчала при любом исходе, и понять, почему приложение
+// не обновилось, было невозможно.
+let updateState = { at: null, server: null, error: null };
+
+async function checkForUpdate(auto = true) {
+  if (!location.protocol.startsWith('http')) {
+    updateState = { at: Date.now(), server: null, error: 'открыто не по ссылке' };
+    return updateState;
+  }
   try {
-    const res = await fetch(location.pathname + '?v=' + Date.now(), { cache: 'reload' });
-    if (!res.ok) return;
+    // Пробиваем все копии сразу: и служебный обработчик, и кэш браузера.
+    const url = location.pathname + '?v=' + Date.now();
+    const res = await fetch(url, { cache: 'reload', headers: { 'Cache-Control': 'no-cache' } });
+    if (!res.ok) {
+      updateState = { at: Date.now(), server: null, error: `сервер ответил кодом ${res.status}` };
+      return updateState;
+    }
     const text = await res.text();
     const m = text.match(/Штурвал · (\d{4}-\d{2}-\d{2}[a-z]*)/);
-    if (!m || m[1] === BUILD) return;
+    updateState = { at: Date.now(), server: m ? m[1] : null,
+                    error: m ? null : 'в ответе нет отметки сборки' };
+    if (!m || m[1] === BUILD) return updateState;
+    if (!auto) return updateState;
 
     // Нашлась другая сборка. Один раз перезагружаемся начисто — и ставим
     // отметку, чтобы не уйти в вечный круг, если сервер отдаёт старое.
@@ -9365,7 +9403,28 @@ async function checkForUpdate() {
       } catch { /* не вышло — перезагрузимся как есть */ }
     }
     location.reload();
-  } catch { /* нет сети — обновимся в следующий раз */ }
+    return updateState;
+  } catch (err) {
+    updateState = { at: Date.now(), server: null,
+                    error: (err && err.message) ? err.message : String(err) };
+    return updateState;
+  }
+}
+
+/** Обновиться немедленно, по нажатию: без ожидания и без догадок. */
+async function forceUpdate() {
+  try {
+    if ('caches' in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map(n => caches.delete(n)));
+    }
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch { /* чистим что вышло */ }
+  // Уникальный адрес обходит любые оставшиеся копии
+  location.replace(location.pathname + '?upd=' + Date.now());
 }
 checkForUpdate();
 document.addEventListener('visibilitychange', () => {
