@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-03g</title>
+<title>Штурвал · 2026-08-03h</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-03g';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03h';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -4897,9 +4897,12 @@ async function tiCall(token, service, method, body = {}) {
       // страницу»: и то и другое приходит одинаковой ошибкой. Поэтому
       // не гадаем о причине, а называем самую частую: Мосбиржа может
       // отвечать, а Т-Банк — нет, если запрос идёт через VPN.
-      last = new Error('Нет связи с Т-Банком: запрос не дошёл. Доступность биржи '
-        + 'об этом ничего не говорит — это разные адреса. Разбираться отсюда: '
-        + '«Проверить доступ к Т-Банку».');
+      // Браузер сообщает одним словом две разные беды: сети нет и сеть есть,
+      // но брокер не пускает запрос с чужой страницы. Утверждать что-то одно
+      // мы не вправе — поэтому отправляем туда, где это различают.
+      last = new Error('Нет связи с Т-Банком. Браузер не различает две беды: сеть молчит '
+        + 'или брокер не пропускает запрос с этой страницы. Различает «Проверить доступ '
+        + 'к Т-Банку» в диагностике.');
       continue;
     }
 
@@ -8621,10 +8624,32 @@ async function openDiagnostics() {
     if (!token) { out.innerHTML = '<div class="muted" style="margin:8px 0">Токена нет — проверять нечего.</div>';
                   probeTi.disabled = false; return; }
 
-    let reached = false, refused = false;
+    let reached = false, refused = false, blocked = false;
     for (const host of hosts) {
       const name = host.replace('https://', '').replace('/rest', '');
-      rows.push({ name, ok: false, ms: 0, error: 'идёт запрос…' });
+
+      // ШАГ 1: доходит ли вообще до адреса. Запрос «без чтения ответа»
+      // (no-cors) не требует разрешения на чужую страницу: он проходит,
+      // если сеть дошла до сервера, и падает, если не дошла. Прочитать
+      // ответ нельзя, но нам и не надо — нужен сам факт.
+      //
+      // Это отличает две беды, которые браузер сообщает одним словом
+      // «Failed to fetch»: сети нет и сеть есть, но сайт не пускает чужую
+      // страницу. Лечатся они по-разному, а выглядели одинаково.
+      let alive = false;
+      const t0 = Date.now();
+      try {
+        const c0 = new AbortController();
+        const tm0 = setTimeout(() => c0.abort(), 8000);
+        await fetch(host, { method: 'GET', mode: 'no-cors', cache: 'no-store', signal: c0.signal });
+        clearTimeout(tm0);
+        alive = true;
+      } catch { alive = false; }
+      rows.push({ name: `${name} — адрес отвечает`, ok: alive, ms: Date.now() - t0,
+                  error: alive ? '' : 'до адреса не достучаться: сеть, DNS или блокировка' });
+      draw('Проверяю…');
+
+      rows.push({ name: `${name} — запрос с токеном`, ok: false, ms: 0, error: 'идёт запрос…' });
       draw('Проверяю…');
       const started = Date.now();
       try {
@@ -8645,24 +8670,34 @@ async function openDiagnostics() {
             : `брокер ответил кодом ${res.status}`);
         }
         await res.json();
-        rows[rows.length - 1] = { name, ok: true, ms: Date.now() - started };
+        rows[rows.length - 1] = { name: `${name} — запрос с токеном`, ok: true, ms: Date.now() - started };
       } catch (err) {
+        // Адрес отвечает, а запрос падает — значит брокер не пускает
+        // страницу. Ни токен, ни сеть тут ни при чём.
+        if (alive && !reached) blocked = true;
         const msg = err && err.name === 'AbortError' ? 'не ответил за 10 с'
+          : alive && !reached ? 'адрес отвечает, но запрос со страницы не пропущен'
           : (err && err.message ? err.message : String(err));
-        rows[rows.length - 1] = { name, ok: false, ms: Date.now() - started, error: msg };
+        rows[rows.length - 1] = { name: `${name} — запрос с токеном`, ok: false,
+                                  ms: Date.now() - started, error: msg };
       }
       draw('Проверяю…');
     }
 
-    const anyOk = rows.some(r => r.ok);
+    const anyOk = rows.some(r => r.ok && / запрос с токеном$/.test(r.name));
     draw(anyOk
       ? 'Брокер доступен и токен принят. Если журнал всё равно не обновляется — покажи этот экран разработчику.'
       : refused
         ? 'Запрос доходит, но брокер отказывает — дело в токене или в лимите, а не в сети. '
           + 'Токен выпускается заново в приложении Т-Инвестиций.'
-        : 'Запрос не дошёл ни до одного адреса брокера. Причина вне приложения: сеть оператора, '
-          + 'VPN, домашний DNS или обслуживание на стороне брокера. Проверь тем же адресом в браузере: '
-          + 'invest-public-api.tinkoff.ru — если и там пусто, приложение здесь бессильно.');
+        : blocked
+          ? 'Адрес брокера отвечает, но запросы с этой страницы он не пропускает. Это не сеть и не токен: '
+            + 'так выглядит запрет на обращения с чужого сайта, и снять его может только сам брокер. '
+            + 'Обычно это временно. Пока не починится, портфель можно обновлять отчётами: '
+            + '«Ещё» → «Другие источники».'
+          : 'Запрос не дошёл ни до одного адреса брокера. Причина вне приложения: сеть оператора, '
+            + 'VPN, домашний DNS или обслуживание на стороне брокера. Проверь тем же адресом в браузере: '
+            + 'invest-public-api.tinkoff.ru — если открывается, дело не в сети, покажи этот экран разработчику.');
     probeTi.disabled = false;
   };
 
