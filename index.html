@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30bk</title>
+<title>Штурвал · 2026-08-03c</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30bk';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03c';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -1022,7 +1022,9 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
           : `${last.p.name} за 12 месяцев не выплатила ничего`,
         detail: `На твоей позиции в ${last.p.name} (${rub(lastValue)}) эта разница стоит `
           + `примерно ${rub(gapMoney)} в год чистыми — если бы те же деньги лежали в ${top.p.name}. `
-          + `Это факт о прошлых выплатах, а не предсказание будущих.`,
+          + `Это факт о прошлых выплатах, а не предсказание будущих. Проценты здесь — фактически `
+          + `пришедшие тебе выплаты за вычетом налога к нынешней цене позиции; в карточках обмена `
+          + `у той же бумаги число выше: там данные биржи до налога.`,
         note: `Если бумага бралась ради роста цены, а не выплат — низкий дивиденд не изъян. `
           + `Перекладка — это комиссия и превращение бумажного результата в настоящий. `
           + `И высокие выплаты ${top.p.name} — решение компании, его могут урезать в любой год.`
@@ -1800,12 +1802,35 @@ function buyRecommendations(state, screenerResults, limit = 5) {
       + 'Ниже просто то, что лучше подходит портфелю по измеримым признакам.';
   }
 
+  // РАЗНООБРАЗИЕ САМОГО СПИСКА. Оценка считается для каждой бумаги отдельно,
+  // и когда сектору хорошо, хорошо сразу всем его бумагам: на экране Ладо
+  // четыре из пяти «подходящих» оказались нефтегазом с одинаковыми 75
+  // баллами. Такой список — не подбор, а ставка на одну отрасль, и она
+  // противоречит соседней карточке, где приложение предупреждает о пределе
+  // в 35% на сектор. Больше двух бумаг одной отрасли в пятёрку не пускаем;
+  // отброшенные остаются ниже, в полном списке.
+  const PER_SECTOR = 2;
+  const ranked = [...items].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const seen = {};
+  const picked = [];
+  let crowded = null;
+  for (const r of ranked) {
+    if (picked.length >= limit) break;
+    const sec = r.kind === 'bond' ? null : (r.sector || null);
+    if (sec) {
+      if ((seen[sec] || 0) >= PER_SECTOR) { crowded = sec; continue; }
+      seen[sec] = (seen[sec] || 0) + 1;
+    }
+    picked.push(r);
+  }
+
   return {
     need: need[0] || null,
-    // Сортировка обязательна ещё раз: списки классов сливались, и порядок
-    // из отдельных отборов здесь уже ничего не значит.
-    items: [...items].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, limit),
-    note,
+    items: picked,
+    note: note + (crowded
+      ? ` Бумаг отрасли «${crowded}» в этом списке не больше двух: у сектора общая судьба, `
+        + `и пять лидеров из одной отрасли — это одна ставка, а не пять. Остальные — ниже, в полном списке.`
+      : ''),
     disclaimer: 'Это не прогноз роста. Это данные о прошлых выплатах, доходности к погашению и сроках. '
       + 'Будущие доходы и цены неизвестны.'
   };
@@ -1878,6 +1903,12 @@ function replacementIdeas(state, candidates = [], opts = {}) {
           continue;
         }
         if (c.ytm - mine.ytm < MIN_YTM_GAP) continue;
+        // ПЛАВАЮЩИЙ КУПОН. «Доходность к погашению» флоатера — не обещание,
+        // а пересчёт сегодняшнего купона на весь срок: снизит ЦБ ставку —
+        // снизится и купон. Сравнивать её с доходностью бумаги с постоянным
+        // купоном и называть разницу выгодой нельзя, это разные величины.
+        // Тот же довод, что и с офертой: совет обязан опираться на известное.
+        if (c.couponType === 'float' && mine.couponType !== 'float') continue;
         // С офертой раньше цели «доходность к погашению» — обещание, которое
         // может не дожить до срока. Такую замену не предлагаем вовсе:
         // выгода в ней недостоверна, а совет обязан опираться на известное.
@@ -1889,6 +1920,10 @@ function replacementIdeas(state, candidates = [], opts = {}) {
         if (!best || gain > best.gain) best = { c, gain, kind: 'bonds' };
       } else {
         if (!(c.yieldPct > 0) || mine.yieldPct == null) continue;
+        // Бумага, про выплаты которой известно, что данные негодны, не
+        // может быть поводом продать свою. Совет обязан опираться на
+        // проверенное — а здесь проверка как раз не прошла.
+        if (c.yieldSuspect === 'implausible') continue;
         if ((c.streak || 0) < 3) continue;      // разовая щедрость не повод меняться
         if (c.yieldPct - mine.yieldPct < MIN_YIELD_GAP) continue;
         // Куда переложим — туда добавится вес; откуда — оттуда уйдёт.
@@ -1967,11 +2002,22 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       how: howTo(p.name, best.c.name, false),
       toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
       title: `${p.name} → ${best.c.name}`,
-      detail: `Выплаты за 12 месяцев: ${((mine.yieldPct || 0) * 100).toFixed(1)}% против ${(best.c.yieldPct * 100).toFixed(1)}%, `
+      detail: `Выплаты за 12 месяцев по данным биржи, до налога: ${((mine.yieldPct || 0) * 100).toFixed(1)}% против ${(best.c.yieldPct * 100).toFixed(1)}%, `
         + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд. На позиции в ${rub(value)} `
         + `разница — около ${rub(best.gain)} в год чистыми, комиссии обмена ${rub(cost)}.`,
       note: `Это наблюдение о прошлых выплатах, а не совет продавать: дивиденды — решение компании и могут быть урезаны. `
         + `Если бумага бралась ради роста бизнеса, низкие выплаты не изъян. Замена меняет и риск: чужой бизнес ты знаешь хуже.`
+        // Двадцать процентов выплат — почти всегда особый дивиденд: продажа
+        // актива, накопленная за годы прибыль. В следующем году его не будет,
+        // и обмен, посчитанный от такой доходности, окупаться будет нечем.
+        + ((best.c.yieldPct || 0) > 0.20
+          ? ` И ещё: выплата больше 20% почти всегда разовая — особый дивиденд, который в следующем году `
+            + `не повторится. Считать по ней ежегодную выгоду обмена нельзя.`
+          : '')
+        + (best.c.yieldSuspect === 'split'
+          ? ` Часть выплат этой бумаги отброшена: до дробления акций суммы были в другом масштабе. `
+            + `Значит, показанная доходность — нижняя граница, а не точное число.`
+          : '')
     });
   }
 
@@ -2009,12 +2055,18 @@ function verdict(state, opts = {}) {
 
   const steps = [];
   const money = v => Math.round(v).toLocaleString('ru-RU') + ' \u20bd';
+  // Сколько из взноса реально дойдёт до бумаг после деления с резервом.
+  // Без этого числа шаг 1 говорил «15 000 ₽ в рынок», а шаг 2 тут же
+  // раскладывал по бумагам все 30 000 ₽ — два соседних пункта одного
+  // вердикта противоречили друг другу.
+  let toMarket = 0;
 
   // 1. Резерв. Первое правило — не потерять: без подушки любая просадка
   //    заставляет продавать бумаги в худший момент.
   if (reserveTarget > 0 && reserve < reserveTarget) {
     const months = expenses > 0 ? reserve / expenses : 0;
     const half = Math.round(monthly / 2);
+    toMarket = reserve <= 0 ? monthly - half : monthly - half;
     steps.push({
       what: reserve <= 0
         ? `Сначала резерв: откладывать ${money(half)} из взноса, пока не наберётся ${money(reserveTarget)}`
@@ -2031,10 +2083,17 @@ function verdict(state, opts = {}) {
     const parts = opts.contribution.steps
       .filter(x => x.amount > 0)
       .map(x => `${money(x.amount)} → ${x.name || classLabel(x.cls)}`);
+    // Разложена вся сумма взноса, а шаг про резерв отдал рынку только часть.
+    // Молчать об этом нельзя: человек купит на все деньги и останется без подушки.
+    const split = toMarket > 0 && opts.contribution.amount > toMarket + 1;
     steps.push({
       what: `Ближайший взнос ${money(opts.contribution.amount)}: ${parts.join(', ')}`,
       why: `Деление — по степени недобора до целевых долей, а не по вкусу: класс, отстающий сильнее, `
-        + `получает больше. Так доли выравниваются сами, без продаж и без комиссий.`,
+        + `получает больше. Так доли выравниваются сами, без продаж и без комиссий.`
+        + (split
+          ? ` Внимание: здесь разложена вся сумма взноса. Если делишь его с резервом (шаг 1), `
+            + `в бумаги идёт ${money(toMarket)} — впиши эту сумму в поле «Ближайший взнос» и пересчитай.`
+          : ''),
       weight: 2
     });
   }
@@ -3787,6 +3846,25 @@ function payoutStreak(history, now = new Date()) {
 }
 
 /**
+ * Во сколько раз должна упасть выплата, чтобы считать ряд разорванным
+ * дроблением акций. Сплит 1:10 делит дивиденд ровно на десять, 1:100 —
+ * на сто; сплитов меньше пяти к одному почти не бывает. Разница между
+ * щедрым и скромным годом одной компании до пяти раз доходит редко,
+ * а если и дойдёт — выплату отбросят и доходность выйдет заниженной.
+ * Занизить безопаснее, чем пообещать: заниженное число видно и помечено,
+ * завышенное толкает продать треть портфеля.
+ */
+const SPLIT_DROP = 5;
+
+/**
+ * Выше этой дивидендной доходности данные не бывают правдой. Рекорды
+ * российского рынка — около 25% годовых, и то по разовым дивидендам.
+ * Сорок процентов оставляют запас даже на самый щедрый год, а всё, что
+ * выше, — испорченные данные: не та валюта, не тот масштаб, не на акцию.
+ */
+const IMPLAUSIBLE_YIELD = 0.40;
+
+/**
  * Фактические выплаты за год к текущей цене.
  *
  * Тонкость, которая стоила приложению правдоподобия: данные биржи по
@@ -3795,6 +3873,11 @@ function payoutStreak(history, now = new Date()) {
  * и выдавать это за факт о рынке. Поэтому окно считается от ПОСЛЕДНЕЙ
  * известной выплаты, а вызывающий код получает её дату и может сказать,
  * насколько данные свежи.
+ *
+ * Возвращает null, когда данным верить нельзя. Ноль и null здесь —
+ * РАЗНЫЕ ответы: ноль значит «не платит», null — «посчитать не из чего».
+ * Спутать их дорого: вызывающий код меряет от доходности выгоду обмена,
+ * и ноль вместо неизвестности раздувает эту выгоду на пустом месте.
  */
 function trailingYield(history, price, now = new Date()) {
   const r = trailingYieldDetailed(history, price, now);
@@ -3803,7 +3886,20 @@ function trailingYield(history, price, now = new Date()) {
 
 function trailingYieldDetailed(history, price, now = new Date()) {
   if (!(price > 0) || !history || !history.length) return null;
-  const sorted = [...history].sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  // ЧУЖАЯ ВАЛЮТА. Биржа отдаёт выплату в той валюте, в какой её объявили,
+  // а цена у нас рублёвая. Поделить доллары на рубли — выдумать число;
+  // курса на дату выплаты приложение не знает и знать не обязано.
+  // Такие строки не считаются вовсе, а вызывающий код узнаёт, сколько
+  // их отброшено, чтобы не выдавать остаток за полную картину.
+  const isRub = h => !h.currency || h.currency === 'RUB' || h.currency === 'SUR';
+  const skippedForeign = history.filter(h => !isRub(h)).length;
+  const sorted = [...history].filter(isRub).sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (!sorted.length) {
+    return { yieldPct: null, payouts: 0, lastDate: null, ageDays: null,
+             stale: false, splitAdjusted: false, skippedForeign, suspect: 'currency' };
+  }
+
   const last = sorted[sorted.length - 1];
   const lastTime = new Date(last.date).getTime();
   if (!isFinite(lastTime)) return null;
@@ -3816,17 +3912,52 @@ function trailingYieldDetailed(history, price, now = new Date()) {
   // Полугодовые и квартальные выплаты при этом остаются все.
   const anchor = Math.min(lastTime, now.getTime());
   const since = new Date(anchor - 350 * 86400000).toISOString().slice(0, 10);
-  const window = sorted.filter(h => h.date >= since);
+  let window = sorted.filter(h => h.date >= since);
+
+  // ДРОБЛЕНИЕ АКЦИЙ. Биржа хранит выплату в том масштабе, в каком её
+  // объявляли, и задним числом не пересчитывает. У Полюса до сплита 1:10
+  // дивиденд был 1301,75 ₽ на акцию, после — 73 ₽. Сложить их и поделить
+  // на сегодняшнюю цену — получить 105% «доходности», которой никогда
+  // не существовало; ровно это приложение и предлагало Ладо как повод
+  // обменять треть портфеля.
+  //
+  // Сплит виден по обрыву ряда: выплата больше ВСЕХ последующих в пять
+  // и более раз. Именно всех, а не соседней: одна скромная четверть
+  // среди щедрых — не сплит, и терять из-за неё год выплат нельзя.
+  // Всё, что было до обрыва, посчитано в других акциях и к нынешней
+  // цене отношения не имеет.
+  let splitAdjusted = false;
+  for (let i = window.length - 1; i > 0; i--) {
+    const after = Math.max(...window.slice(i).map(h => h.value));
+    if (window[i - 1].value >= after * SPLIT_DROP) {
+      window = window.slice(i);
+      splitAdjusted = true;
+      break;
+    }
+  }
+
   const sum = window.reduce((a, h) => a + h.value, 0);
+  const raw = sum / price;
+  // ПОСЛЕДНЯЯ ПРОВЕРКА НА ВМЕНЯЕМОСТЬ. Ряд может выглядеть ровным и всё
+  // равно врать: выплата не на акцию, цена не той бумаги, масштаб не тот.
+  // Доходность выше 40% означает не щедрую компанию, а битые данные —
+  // и такую бумагу нельзя показывать как кандидата ни при каких условиях.
+  const implausible = raw > IMPLAUSIBLE_YIELD;
 
   const ageDays = Math.round((now.getTime() - lastTime) / 86400000);
   return {
-    yieldPct: sum / price,
+    yieldPct: implausible ? null : raw,
+    rawYieldPct: raw,               // что вышло до проверки — чтобы объяснить отказ
     payouts: window.length,
     lastDate: last.date,
     ageDays,
     // Данные старше полутора лет — это уже история, а не «текущая доходность»
-    stale: ageDays > 540
+    stale: ageDays > 540,
+    splitAdjusted,
+    skippedForeign,
+    suspect: implausible ? 'implausible'
+           : splitAdjusted ? 'split'
+           : skippedForeign ? 'currency' : null
   };
 }
 
@@ -3902,8 +4033,34 @@ function fitScore(row, ctx = {}) {
       why.push(`последняя известная выплата — ${String(row.payoutLastDate || '').split('-').reverse().join('.')}, `
         + `данные биржи могут отставать`);
     }
+    // Данные биржи о выплатах не сошлись с ценой. Молча занулить их —
+    // значит сказать «не платит», чего мы не знаем. Говорим как есть.
+    if (row.yieldSuspect === 'implausible') {
+      score -= 30;
+      why.push(`выплаты по данным биржи дают ${((row.rawYieldPct || 0) * 100).toFixed(0)}% к цене — `
+        + `такой доходности не бывает, данные считаем негодными и в оценку не берём`);
+    } else if (row.yieldSuspect === 'split') {
+      score -= 5;
+      why.push(`часть выплат отброшена: суммы до дробления акций несопоставимы с нынешней ценой, `
+        + `доходность посчитана только по новым и потому занижена`);
+    }
     if (row.cap > 2e11) { score += 10; why.push('крупная компания'); }
     else if (row.cap > 5e10) score += 5;
+
+    // Сектор, который в портфеле уже у предела. Бумаги одной отрасли падают
+    // вместе, поэтому «хорошая бумага» из перегруженного сектора добавляет
+    // портфелю не разнообразия, а веса тому же риску. Предел тот же, что и
+    // в карточке секторного перекоса, — правило одно на всё приложение.
+    const secShare = (ctx.sectorShares || {})[row.sector] || 0;
+    const secMax = ctx.sectorMax || 0.35;
+    if (secShare >= secMax) {
+      score -= 20;
+      why.push(`отрасль «${row.sector}» уже ${(secShare * 100).toFixed(0)}% портфеля при пределе `
+        + `${(secMax * 100).toFixed(0)}% — покупка усилит перекос`);
+    } else if (secShare >= secMax * 0.8) {
+      score -= 8;
+      why.push(`отрасль «${row.sector}» уже ${(secShare * 100).toFixed(0)}% портфеля — близко к пределу`);
+    }
   }
 
   // Соответствие стратегии: недобранный класс важнее добранного.
@@ -3954,6 +4111,7 @@ function screenBonds(rows, filters = {}, ctx = {}) {
 }
 
 return {screenStocks, screenBonds, fitScore, payoutStreak, trailingYield, trailingYieldDetailed,
+        YIELD_LIMITS: { implausible: IMPLAUSIBLE_YIELD, splitDrop: SPLIT_DROP },
         SCREENER_UNAVAILABLE: UNAVAILABLE};
 })());
 
@@ -6483,7 +6641,8 @@ async function init() {
 // ДО перекрытия и зовём только их.
 // Чистые функции скринера store не перекрывает, но берём их так же явно:
 // правило «зови оригинал, а не себя» должно быть одинаковым по всему модулю.
-const R2 = { trailingYield: reports.trailingYield, payoutStreak: reports.payoutStreak };
+const R2 = { trailingYield: reports.trailingYield, payoutStreak: reports.payoutStreak,
+             trailingYieldDetailed: reports.trailingYieldDetailed };
 const R = {
   explainSecurity: reports.explainSecurity,
   upcomingPayments: reports.upcomingPayments,
@@ -6569,6 +6728,22 @@ async function findIdeas(kind, filters = {}, opts = {}) {
           hedge: (st.summary.byClass.hedge || 0) / st.summary.securities }
       : {},
     goalYears: Number(st.settings?.goal?.years) || 0,
+    // Доли отраслей в портфеле — чтобы отбор не советовал доливать туда,
+    // где и без того перекос. Считаются от всей стоимости бумаг, как и в
+    // карточке «Акции по секторам»: одно правило — одно место.
+    sectorShares: (() => {
+      const total = Number(st.summary?.securities) || 0;
+      if (!(total > 0)) return {};
+      const out = {};
+      for (const p of st.positions.filter(x => x.qty > 0)) {
+        if (allocationClass(p) !== 'stocks') continue;
+        const sec = p.sector || sectorOf(p);
+        if (!sec) continue;
+        out[sec] = (out[sec] || 0) + (p.qty * p.price) / total;
+      }
+      return out;
+    })(),
+    sectorMax: (SH.LIMITS && SH.LIMITS.sectorMax) || 0.35,
     moneyRate: market && market.moneyRate > 0 ? market.moneyRate / 100 : 0.16,
     marketYield: 0.08
   };
@@ -6616,7 +6791,7 @@ async function findIdeas(kind, filters = {}, opts = {}) {
   // пустотой (компания не платит) и ответила выплатами. Раньше все три
   // давали ноль, и «платят хоть что-то 0» выглядело как факт о рынке,
   // хотя могло означать поломку связи.
-  let noAnswer = 0, noPayouts = 0, oldPayouts = 0;
+  let noAnswer = 0, noPayouts = 0, oldPayouts = 0, suspect = 0;
   rough.forEach((r, i) => {
     const hist = histories[i];
     if (!hist) { r.streak = 0; r.yieldPct = 0; r.histFailed = true; noAnswer += 1; return; }
@@ -6627,9 +6802,15 @@ async function findIdeas(kind, filters = {}, opts = {}) {
     r.payoutAgeDays = detail ? detail.ageDays : null;
     r.payoutLastDate = detail ? detail.lastDate : null;
     r.payoutStale = detail ? detail.stale : false;
+    // Данные, которым нельзя верить, помечаются и дальше не считаются
+    // доходностью. Четвёртый исход рядом с «не ответила», «не платит» и
+    // «платили давно»: биржа ответила, но ответ неправдоподобен.
+    r.yieldSuspect = detail ? detail.suspect : null;
+    r.rawYieldPct = detail ? detail.rawYieldPct : null;
+    if (r.yieldSuspect === 'implausible') suspect += 1;
     r.lastPayout = hist[hist.length - 1];
     // Выплаты были, но так давно, что считать их текущими нельзя.
-    if (!(r.yieldPct > 0)) oldPayouts += 1;
+    if (!(r.yieldPct > 0) && r.yieldSuspect !== 'implausible') oldPayouts += 1;
   });
   // Разбор рынка. «Ничего не подошло» — отказ без вывода: человек не
   // понимает, планка ли высока или рынок такой. Считаем картину: сколько
@@ -6660,7 +6841,7 @@ async function findIdeas(kind, filters = {}, opts = {}) {
   return {
     rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx,
     market: { onBoard: all.length, checked: rough.length, paying: paying.length,
-              noAnswer, noPayouts, oldPayouts,
+              noAnswer, noPayouts, oldPayouts, suspect,
               best: nearMiss[0] || null, nearMiss }
   };
 }
@@ -6703,7 +6884,8 @@ async function findReplacements() {
     const all = await moex.fetchAllBonds(['gov']);
     const mine = new Set(myBonds.map(p => p.ticker));
     for (const r of all) {
-      if (mine.has(r.ticker)) facts.push({ ticker: r.ticker, ytm: r.ytm, yearsLeft: r.yearsLeft });
+      if (mine.has(r.ticker)) facts.push({ ticker: r.ticker, ytm: r.ytm, yearsLeft: r.yearsLeft,
+                                           couponType: r.couponType });
       else candidates.push({ ...r, kind: 'bond' });
     }
   }
@@ -6721,17 +6903,25 @@ async function findReplacements() {
     myStocks.forEach((p, i) => {
       const row = all.find(r => r.ticker === p.ticker);
       const hist = mineHist[i];
+      // Биржа промолчала — это НЕ «выплат ноль». Ноль здесь означал бы, что
+      // своя бумага не платит ничего, и любая чужая выглядела бы выгоднее
+      // на всю свою доходность. Неизвестность так и передаётся дальше:
+      // про такую бумагу обмен не предлагается вовсе.
       facts.push(hist
         ? { ticker: p.ticker, yieldPct: R2.trailingYield(hist, (row && row.price) || p.price),
             streak: R2.payoutStreak(hist) }
-        : { ticker: p.ticker, yieldPct: 0, streak: 0 });
+        : { ticker: p.ticker, yieldPct: null, streak: 0 });
     });
 
     const candHist = await mapLimit(shortlist, 6, r => moex.fetchDividendHistory(r.ticker));
     shortlist.forEach((r, i) => {
       const hist = candHist[i];
       if (!hist) return;      // без истории выплат бумага в кандидаты не годится
-      candidates.push({ ...r, kind: 'stock', yieldPct: R2.trailingYield(hist, r.price),
+      const detail = R2.trailingYieldDetailed(hist, r.price);
+      candidates.push({ ...r, kind: 'stock',
+                        yieldPct: detail ? detail.yieldPct : null,
+                        yieldSuspect: detail ? detail.suspect : null,
+                        payouts: detail ? detail.payouts : 0,
                         streak: R2.payoutStreak(hist) });
     });
   }
@@ -7534,7 +7724,8 @@ function renderIdeas(res) {
         На бирже ${m.onBoard} акций. Проверены ${m.checked} крупнейших: платят за последний год ${m.paying}${
           m.oldPayouts ? `, платили раньше ${m.oldPayouts}` : ''}${
           m.noPayouts ? `, не платят вовсе ${m.noPayouts}` : ''}${
-          m.noAnswer ? `, <span style="color:var(--warn)">история не пришла у ${m.noAnswer}</span>` : ''}.
+          m.noAnswer ? `, <span style="color:var(--warn)">история не пришла у ${m.noAnswer}</span>` : ''}${
+          m.suspect ? `, <span style="color:var(--warn)">данные биржи неправдоподобны у ${m.suspect}</span>` : ''}.
         Порог: выплаты за год от 6% и минимум 3 года подряд — считаются от последней известной выплаты,
         потому что данные биржи по дивидендам отстают на месяцы.
       </div>
@@ -7592,7 +7783,9 @@ function renderIdeas(res) {
       ${rows.slice(0, 25).map(card).join('')}
       <p class="muted" style="margin-top:10px">Оценка 0–100 — насколько бумага подходит твоему портфелю:
         выплаты, стабильность, срок, недобор класса. Уже купленные получают штраф за концентрацию.
-        Это не прогноз роста.</p>
+        Это не прогноз роста. Проценты выплат здесь — по данным биржи, ДО налога: на счёт приходит
+        примерно на 13% меньше, и в карточках твоего портфеля стоит уже чистая сумма. Поэтому у одной
+        и той же бумаги число здесь выше — это не расхождение, а разные базы.</p>
     </div>`;
 }
 
@@ -8874,8 +9067,14 @@ function openWhatsNew() {
     <div style="font-weight:700;font-size:13.5px;margin-bottom:3px">${t}</div>
     <div class="muted" style="line-height:1.6">${d}</div></div>`;
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Что нового · сборка ${BUILD}</h2>
-    <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля. Отметка сборки внизу главной
+    <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля и 3 августа. Отметка сборки внизу главной
       обязана совпадать с именем скачанного файла — иначе открылся старый.</p>
+    ${item('Дробление акций больше не раздувает доходность', 'Биржа хранит старые дивиденды в прежнем масштабе: у Полюса до сплита 1:10 выплата была 1301,75 ₽ на акцию, после — 73 ₽. Сложенные вместе и делённые на нынешнюю цену, они давали «105,5% выплат за год», и приложение предлагало обменять на Полюс четыре бумаги из пяти. Теперь такой обрыв ряда виден, старые выплаты отбрасываются, а доходность выше 40% считается испорченными данными и в советы не идёт.')}
+    ${item('Ноль и «неизвестно» разведены', 'Если биржа промолчала о выплатах твоей бумаги, это больше не «выплат ноль»: обмен по такой бумаге не предлагается вовсе. Раньше молчание раздувало выгоду обмена на всю доходность чужой бумаги.')}
+    ${item('Плавающий купон не выдаётся за прибавку', 'Доходность к погашению флоатера держится ровно до следующего решения ЦБ по ставке. Сравнивать её с бумагой постоянного купона и называть разницу выгодой нельзя — такие замены больше не предлагаются.')}
+    ${item('У каждого процента выплат названа база', 'На одном экране стояли 18,8% и 16,5% по МТС, и оба верны: биржа отдаёт дивиденд до налога, а карточки твоего портфеля считают то, что дошло до счёта. Теперь это написано там, где числа показываются, — чтобы не выглядело расхождением.')}
+    ${item('Пятёрка лидеров — не ставка на одну отрасль', 'Когда сектору хорошо, хорошо сразу всем его бумагам: в «что подходит портфелю» выходило четыре нефтегаза из пяти с одинаковой оценкой. Теперь бумаг одной отрасли в этом списке не больше двух, а бумага из отрасли, которая в портфеле уже у предела 35%, получает штраф к оценке.')}
+    ${item('Вердикт не спорит сам с собой', 'Шаг «делить взнос пополам» и план размещения взноса теперь согласованы: если половина идёт в резерв, план прямо говорит, сколько остаётся бумагам.')}
     ${item('Ближайший взнос — куда именно', 'План деления по бумагам с точностью до рубля; сумму месяца можно править — правка живёт один месяц.')}
     ${item('Роль каждой бумаги', 'На карточке позиции: защита, предсказуемый доход, доход и рост или ставка на рост — и почему она заслуживает место.')}
     ${item('Сравнение двух бумаг', 'На карточке позиции: одна сумма, два варианта — что каждая заплатит за год чистыми.')}
