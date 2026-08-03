@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-03e</title>
+<title>Штурвал · 2026-08-03g</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-03e';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03g';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -4892,7 +4892,16 @@ async function tiCall(token, service, method, body = {}) {
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
         body: JSON.stringify(body)
       });
-    } catch (err) { last = new Error('Нет связи с Т-Банком'); continue; }
+    } catch (err) {
+      // Браузер не отличает «сеть не дошла» от «сайт не пустил чужую
+      // страницу»: и то и другое приходит одинаковой ошибкой. Поэтому
+      // не гадаем о причине, а называем самую частую: Мосбиржа может
+      // отвечать, а Т-Банк — нет, если запрос идёт через VPN.
+      last = new Error('Нет связи с Т-Банком: запрос не дошёл. Доступность биржи '
+        + 'об этом ничего не говорит — это разные адреса. Разбираться отсюда: '
+        + '«Проверить доступ к Т-Банку».');
+      continue;
+    }
 
     if (res.ok) { tiHost = host; return res.json(); }
 
@@ -6978,6 +6987,13 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   const accountId = await db.getMeta('tiAccount');
   if (!token || !accountId) return { skipped: 'нет токена' };
 
+  // Разбор прошлой попытки живёт до следующей — и ни минутой дольше.
+  // Иначе одноразовое «обновление оборвалось, обнови ещё раз» висит на
+  // экране вечно: совет, которому человек уже последовал, но выполнить
+  // его не удалось, и карточка осталась пугать. Всё, что найдётся в этот
+  // раз, будет записано заново к концу разбора.
+  await db.setMeta('tiProblem', null);
+
   const before = await db.allOps();          // на случай, если ничего не сойдётся
   // Пересборка сначала удаляет журнал, потом пишет новый. Если между этими
   // шагами всё оборвётся — вкладку закрыли, база упала — копия в памяти
@@ -8494,6 +8510,8 @@ async function openDiagnostics() {
     <button class="btn ghost wide" id="bForceUpdate" style="margin:10px 0">Обновить приложение сейчас</button>
     <button class="btn ghost wide" id="bProbe" style="margin-bottom:10px">Проверить доступ к бирже</button>
     <div id="probeOut"></div>
+    <button class="btn ghost wide" id="bProbeTi" style="margin-bottom:10px">Проверить доступ к Т-Банку</button>
+    <div id="probeTiOut"></div>
     <button class="btn wide" id="bDiagSync">Собрать журнал заново</button>
     <div id="bDiagOut"></div>`);
 
@@ -8571,6 +8589,81 @@ async function openDiagnostics() {
         : 'Не проходит даже крошечный запрос: доступ к бирже закрыт целиком — сеть оператора, VPN или сбой самой биржи. '
           + 'Проверь тем же адресом в браузере: iss.moex.com/iss/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json');
     probe.disabled = false;
+  };
+
+  /**
+   * ПРОВЕРКА ДОСТУПА К Т-БАНКУ. Отдельная от биржевой: адреса разные, и
+   * работающая биржа не говорит о брокере ничего. Ходим по каждому хосту
+   * по очереди и различаем три исхода, которые в одном слове «нет связи»
+   * сливались в один: запрос не дошёл вовсе, брокер ответил отказом,
+   * брокер ответил делом. Первый — сеть или блокировка, второй — токен
+   * или лимит, и лечатся они по-разному.
+   */
+  const probeTi = $('bProbeTi');
+  if (probeTi) probeTi.onclick = async () => {
+    const out = $('probeTiOut');
+    if (!out) return;
+    probeTi.disabled = true;
+    const token = await store.getMeta('tiToken');
+    const hosts = ['https://invest-public-api.tinkoff.ru/rest',
+                   'https://invest-public-api.tbank.ru/rest'];
+    const rows = [];
+    const draw = note => {
+      out.innerHTML = `<div style="margin:8px 0">${rows.map(r => `
+        <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
+          <span class="muted" style="flex:1">${esc(r.name)}</span>
+          <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
+            r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
+        </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
+        ${note ? `<div class="muted" style="margin-top:8px;line-height:1.6">${esc(note)}</div>` : ''}</div>`;
+    };
+
+    if (!token) { out.innerHTML = '<div class="muted" style="margin:8px 0">Токена нет — проверять нечего.</div>';
+                  probeTi.disabled = false; return; }
+
+    let reached = false, refused = false;
+    for (const host of hosts) {
+      const name = host.replace('https://', '').replace('/rest', '');
+      rows.push({ name, ok: false, ms: 0, error: 'идёт запрос…' });
+      draw('Проверяю…');
+      const started = Date.now();
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(`${host}/tinkoff.public.invest.api.contract.v1.UsersService/GetAccounts`, {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: '{}'
+        });
+        clearTimeout(timer);
+        reached = true;
+        if (!res.ok) {
+          refused = true;
+          throw new Error(res.status === 401 || res.status === 403
+            ? `отказ ${res.status}: токен не принят — отозван, истёк или скопирован не целиком`
+            : res.status === 429 ? 'отказ 429: слишком много запросов, подожди минуту'
+            : `брокер ответил кодом ${res.status}`);
+        }
+        await res.json();
+        rows[rows.length - 1] = { name, ok: true, ms: Date.now() - started };
+      } catch (err) {
+        const msg = err && err.name === 'AbortError' ? 'не ответил за 10 с'
+          : (err && err.message ? err.message : String(err));
+        rows[rows.length - 1] = { name, ok: false, ms: Date.now() - started, error: msg };
+      }
+      draw('Проверяю…');
+    }
+
+    const anyOk = rows.some(r => r.ok);
+    draw(anyOk
+      ? 'Брокер доступен и токен принят. Если журнал всё равно не обновляется — покажи этот экран разработчику.'
+      : refused
+        ? 'Запрос доходит, но брокер отказывает — дело в токене или в лимите, а не в сети. '
+          + 'Токен выпускается заново в приложении Т-Инвестиций.'
+        : 'Запрос не дошёл ни до одного адреса брокера. Причина вне приложения: сеть оператора, '
+          + 'VPN, домашний DNS или обслуживание на стороне брокера. Проверь тем же адресом в браузере: '
+          + 'invest-public-api.tinkoff.ru — если и там пусто, приложение здесь бессильно.');
+    probeTi.disabled = false;
   };
 
   $('bDiagSync').onclick = async () => {
@@ -9060,6 +9153,7 @@ function openWhatsNew() {
     ${item('Дробление акций больше не раздувает доходность', 'Биржа хранит старые дивиденды в прежнем масштабе: у Полюса до сплита 1:10 выплата была 1301,75 ₽ на акцию, после — 73 ₽. Сложенные вместе и делённые на нынешнюю цену, они давали «105,5% выплат за год», и приложение предлагало обменять на Полюс четыре бумаги из пяти. Теперь такой обрыв ряда виден, старые выплаты отбрасываются, а доходность выше 40% считается испорченными данными и в советы не идёт.')}
     ${item('Ноль и «неизвестно» разведены', 'Если биржа промолчала о выплатах твоей бумаги, это больше не «выплат ноль»: обмен по такой бумаге не предлагается вовсе. Раньше молчание раздувало выгоду обмена на всю доходность чужой бумаги.')}
     ${item('Плавающий купон не выдаётся за прибавку', 'Доходность к погашению флоатера держится ровно до следующего решения ЦБ по ставке. Сравнивать её с бумагой постоянного купона и называть разницу выгодой нельзя — такие замены больше не предлагаются.')}
+    ${item('Проверка доступа к Т-Банку', 'Раньше любое молчание брокера выглядело одинаково — «нет связи». Теперь в диагностике есть отдельная проверка: она ходит по обоим адресам брокера и различает три разных случая — запрос не дошёл (сеть, VPN, DNS), брокер ответил отказом (токен или лимит) или всё в порядке. Доступность биржи о брокере не говорит ничего: это разные адреса.')}
     ${item('Серия выплат больше не переживает саму компанию', '«Платит 3 года подряд» считается по годам, в которые выплаты были, и держится ещё долго после того, как компания платить перестала — у Полюса, отказавшегося от дивидендов до 2030 года, серия всё ещё три года. Бумага без выплат больше года на обмен не зовёт, а рядом с серией теперь стоит дата последней выплаты.')}
     ${item('У каждого процента выплат названа база', 'На одном экране стояли 18,8% и 16,5% по МТС, и оба верны: биржа отдаёт дивиденд до налога, а карточки твоего портфеля считают то, что дошло до счёта. Теперь это написано там, где числа показываются, — чтобы не выглядело расхождением.')}
     ${item('Пятёрка лидеров — не ставка на одну отрасль', 'Когда сектору хорошо, хорошо сразу всем его бумагам: в «что подходит портфелю» выходило четыре нефтегаза из пяти с одинаковой оценкой. Теперь бумаг одной отрасли в этом списке не больше двух, а бумага из отрасли, которая в портфеле уже у предела 35%, получает штраф к оценке.')}
