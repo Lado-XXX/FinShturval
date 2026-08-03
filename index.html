@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30bb</title>
+<title>Штурвал · 2026-07-30bk</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30bb';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30bk';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -869,8 +869,70 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
         title: `${p.name} — ${(w * 100).toFixed(0)}% портфеля`,
         detail: `Одна компания занимает больше четверти. Плохая новость по ней ударит по портфелю `
           + `сильнее, чем по рынку.`,
+        cost: (() => {
+          const c = concentrationCost({ byClass: s.byClass, securities: s.securities,
+            positions: state.positions, monthly: Number(state.settings?.monthlyContribution) || 0,
+            rates: ratesFor(Number(state.settings?.bondYtm) || 0, Number(state.settings?.stockYield) || 0).rates });
+          return c && c.costInBadYear > 300 ? c : null;
+        })(),
         note: `Это не повод продавать: доля растёт и от того, что бумага дорожает. `
           + `Достаточно не докупать её, пока остальные подтягиваются.`
+      });
+    }
+  }
+
+  // ── 3а. Чувствительность облигаций к ставке ────────────────────────
+  // Облигацию часто считают «безрисковой» и пугаются красной цифры при
+  // росте ставки. Величина этого движения известна заранее — значит, о ней
+  // надо сказать до того, как человек её увидит.
+  for (const r of (flow.rows || [])) {
+    if (r.kind !== 'bond' || !(r.ytm > 0) || !(r.yearsLeft > 0)) continue;
+    const pos = owned.find(p => p.ticker === r.ticker);
+    if (!pos) continue;
+    const value = positionValue(pos);
+    const sens = rateSensitivity({ ytm: r.ytm, yearsLeft: r.yearsLeft,
+                                   durationYears: r.durationYears || 0, value });
+    if (!sens || sens.moveMoney < 300) continue;   // мелкое движение — не новость
+    out.push({
+      kind: 'duration', urgency: 'info', ticker: r.ticker,
+      title: `${r.name || r.ticker}: цена ходит за ставкой`,
+      detail: `Если ставка вырастет на 1 процентный пункт, бумага подешевеет примерно на `
+        + `${(sens.movePct * 100).toFixed(1)}% — около ${Math.round(sens.moveMoney).toLocaleString('ru-RU')} \u20bd `
+        + `на твоей позиции. При снижении ставки столько же прибавит. Это не поломка и не ошибка выбора: `
+        + `так устроены все облигации с постоянным купоном.`,
+      note: `Держишь до погашения — колебания цены не важны: государство вернёт номинал, а доходность `
+        + `${(r.ytm * 100).toFixed(1)}% ты уже зафиксировал при покупке. Важны они только если продавать раньше срока.`
+    });
+    break;                                          // одной такой карточки достаточно
+  }
+
+  // ── 3б. Защита от инфляции ─────────────────────────────────────────
+  // Весь обычный доход — номинальный: купон в рублях, дивиденд в рублях.
+  // Если инфляция окажется выше ожидаемой, съедено будет именно это.
+  // Единственный инструмент с прямой защитой — облигации с индексируемым
+  // номиналом. Молчать о них при длинной цели — умолчание не в пользу
+  // человека.
+  const inflation = Number(state.settings?.inflation) || 0;
+  const goalYearsLeft = Number(state.settings?.goal?.years) || 0;
+  if (inflation > 0 && goalYearsLeft >= 3) {
+    const bondRows = (flow.rows || []).filter(r => r.kind === 'bond');
+    const hasLinker = bondRows.some(r => r.bondKind === 'linker')
+      || owned.some(p => /SU52|ИН(?![А-Яа-я])/i.test(`${p.ticker} ${p.name || ''}`));
+    if (!hasLinker && (s.byClass.bonds || 0) > 0) {
+      const rates = ratesFor(Number(state.settings?.bondYtm) || 0,
+                             Number(state.settings?.stockYield) || 0).rates;
+      const nominal = expectedReturn(s.byClass, s.securities, rates);
+      const real = realReturn(nominal, inflation);
+      out.push({
+        kind: 'inflation', urgency: 'info',
+        title: `Защиты от инфляции в портфеле нет`,
+        detail: `Весь доход здесь номинальный: купон и дивиденд назначены в рублях. При инфляции `
+          + `${(inflation * 100).toFixed(0)}% из ${(nominal * 100).toFixed(1)}% годовых остаётся `
+          + `${(real * 100).toFixed(1)}% настоящего роста. Если инфляция окажется выше, съест она именно это.`,
+        note: `Прямую защиту дают только облигации с индексируемым номиналом (ОФЗ-ИН): их тело растёт `
+          + `вместе с инфляцией, а доходность к погашению у них означает доход СВЕРХ неё. Это не срочно `
+          + `и не обязательно — но при цели через ${goalYearsLeft} ${goalYearsLeft < 5 ? 'года' : 'лет'} `
+          + `стоит знать, что такой инструмент существует.`
       });
     }
   }
@@ -1043,7 +1105,8 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
   // (докупка, перекладка), потом «что заметить» (перевесы, концентрации,
   // выплаты), затем справки о бумагах, и контекст рынка — в самом конце.
   const kindOrder = { buy: 0, swap: 1, over: 2, hedge: 3, concentration: 4,
-                      sector: 5, yieldgap: 6, bond: 7, horizon: 8, pulse: 9 };
+                      sector: 5, inflation: 6, duration: 7, yieldgap: 8, bond: 9,
+                      horizon: 10, pulse: 11 };
   return out.sort((a, b) =>
     (rank[a.urgency] ?? 2) - (rank[b.urgency] ?? 2)
     || (kindOrder[a.kind] ?? 5) - (kindOrder[b.kind] ?? 5));
@@ -1797,6 +1860,9 @@ function replacementIdeas(state, candidates = [], opts = {}) {
     for (const c of candidates) {
       if (ownedTickers.has(c.ticker)) continue;
       if ((c.kind === 'bond' ? 'bonds' : 'stocks') !== cls) continue;
+      // Менять ликвидную бумагу на неликвидную — менять шило на мыло:
+      // расчётная выгода останется на бумаге, а выход обойдётся дороже.
+      if (c.turnover !== undefined && c.turnover < value * 10) continue;
 
       if (cls === 'bonds') {
         if (!(c.ytm > 0) || !(mine.ytm > 0)) continue;
@@ -1997,9 +2063,18 @@ function verdict(state, opts = {}) {
   }
 
   // Замысел целиком: связь с целью и бюджетом.
+  const inflation = Number(opts.inflation) || 0;
+  const goalToday = inflation > 0 && goalAmount > 0 && goalYears > 0
+    ? goalAmount / Math.pow(1 + inflation, goalYears) : 0;
+
   const plan = goalAmount > 0 && goalYears > 0
-    ? `Цель — ${money(goalAmount)} за ${goalYears} ${goalYears < 5 ? 'года' : 'лет'} при взносе ${money(monthly)} в месяц. `
-      + `Главный двигатель здесь не выбор бумаг, а регулярность взносов и время: рынок добавляет разброс, `
+    ? `Цель — ${money(goalAmount)} за ${goalYears} ${goalYears < 5 ? 'года' : 'лет'} при взносе ${money(monthly)} в месяц.`
+      + (goalToday > 0
+          ? ` По покупательной способности это примерно ${money(goalToday)} сегодняшними деньгами: `
+            + `инфляцию ${(inflation * 100).toFixed(0)}% в год приложение не прячет, потому что именно она `
+            + `решает, что ты сможешь на эти деньги купить.`
+          : '')
+      + ` Главный двигатель здесь не выбор бумаг, а регулярность взносов и время: рынок добавляет разброс, `
       + `а взносы — уверенность.`
     : `Цель не задана — без неё советовать можно только про доли и риск, но не про срок.`;
 
@@ -2009,8 +2084,79 @@ function verdict(state, opts = {}) {
       + `и денежный рынок платят необычно много, а акции проигрывают им в выплатах. Это состояние рынка, а не приговор акциям.`
     : '';
 
+  /**
+   * Чего делать НЕ надо. Половина сохранённых денег — это не сделанные
+   * глупости, а не удачные покупки. Каждый запрет опирается на число из
+   * твоего портфеля, а не на общую мудрость.
+   */
+  const avoid = [];
+  const positions = (state.positions || []).filter(p => p.qty > 0);
+
+  // 1. Не докупать то, что уже за пределом доли.
+  for (const p of positions) {
+    const share = s.securities > 0 ? positionValue(p) / s.securities : 0;
+    if (share > LIMITS.singlePosition) {
+      avoid.push({
+        what: `Не докупать ${p.name}`,
+        why: `Она уже ${(share * 100).toFixed(0)}% портфеля при пределе ${Math.round(LIMITS.singlePosition * 100)}%. `
+          + `Продавать не нужно: доля выровняется сама, когда взносы пойдут в другие бумаги.`
+      });
+      break;                        // одного примера достаточно, список не должен пугать
+    }
+  }
+
+  // 2. Не продавать просевшее ради перекладки без измеримой выгоды.
+  const deepLoss = positions
+    .filter(p => positionCost(p) > 0)
+    .map(p => ({ p, off: positionValue(p) / positionCost(p) - 1 }))
+    .sort((a, b) => a.off - b.off)[0];
+  if (deepLoss && deepLoss.off < -0.15) {
+    avoid.push({
+      what: `Не продавать ${deepLoss.p.name} только потому, что она в минусе`,
+      why: `Минус ${Math.abs(deepLoss.off * 100).toFixed(0)}% — это пока бумажный результат. Продажа делает `
+        + `его настоящим, а на ИИС такой убыток не уменьшит налоги по другим счетам. Менять имеет смысл `
+        + `только когда другая бумага даёт измеримо больше — такие случаи приложение показывает отдельно.`
+    });
+  }
+
+  // 3. Не гнаться за разовой щедростью.
+  if (opts.hugeYield && opts.hugeYield.yieldPct > 0.20) {
+    avoid.push({
+      what: `Не покупать ${opts.hugeYield.name} ради ${(opts.hugeYield.yieldPct * 100).toFixed(0)}% дивидендов`,
+      why: `Выплата больше 20% почти всегда разовая: особый дивиденд, который в следующем году не повторится. `
+        + `После отсечки цена падает примерно на её размер, и «доходность» остаётся только в прошлом.`
+    });
+  }
+
+  // 4. Не держать деньги без дела при высокой ставке.
+  const idle = Number(s.cash) || 0;
+  if (rate > 0.10 && idle > 5000) {
+    avoid.push({
+      what: `Не оставлять ${money(idle)} лежать на счёте`,
+      why: `При ставке ${(rate * 100).toFixed(1)}% это примерно ${money(idle * rate)} в год мимо. `
+        + `Деньги, которые скоро понадобятся, держат в фонде денежного рынка, а не просто на счёте.`
+    });
+  }
+
+  // 5. Не закрывать счёт раньше срока.
+  if (settings.iisOpenDate && goalYears > 0) {
+    const term = Number(settings.iisTermYears) || 5;
+    const closeAt = new Date(settings.iisOpenDate);
+    closeAt.setFullYear(closeAt.getFullYear() + term);
+    const yearsLeft = (closeAt - new Date()) / (365.25 * 86400000);
+    if (yearsLeft > 0 && goalYears < yearsLeft) {
+      avoid.push({
+        what: 'Не закрывать ИИС ради цели раньше срока',
+        why: `До окончания минимального срока ещё ${yearsLeft.toFixed(1)} года, а цель ты планируешь через `
+          + `${goalYears}. Закрытие раньше означает вернуть государству все полученные вычеты — `
+          + `это дороже, чем подождать или взять деньги из другого источника.`
+      });
+    }
+  }
+
   return {
     steps: steps.sort((a, b) => a.weight - b.weight),
+    avoid: avoid.slice(0, 3),
     plan: plan + rateNote,
     caution: 'Ни один советник не знает будущих цен. Всё выше посчитано из того, что можно проверить: '
       + 'твои доли, выплаты, ставки, сроки и лимиты. Обещание «станет больше денег» — первый признак, что вас обманывают.'
@@ -2291,16 +2437,46 @@ const ASSUMED = { stocks: 0.13, bonds: 0.12, hedge: 0.06 };
  * из допущений. Возвращает и пометку, что именно измерено, а что принято
  * на веру: пользователь имеет право знать, откуда взялось число.
  */
-function ratesFor(bondYtm) {
-  const measured = bondYtm > 0.01 && bondYtm < 1;
+/**
+ * Ожидаемая доходность акций складывается из двух частей, и честно их
+ * разделить: выплаты — измеримы (дивиденды твоих бумаг за год), рост цены —
+ * нет. Поэтому первая берётся из данных, вторая остаётся допущением и
+ * называется допущением.
+ */
+const ASSUMED_GROWTH = 0.05;   // рост цены сверх выплат — допущение, не расчёт
+
+function ratesFor(bondYtm, stockYield = 0) {
+  const bondsOk = bondYtm > 0.01 && bondYtm < 1;
+  const stocksOk = stockYield > 0.005 && stockYield < 0.5;
+
+  // Осторожность в прогнозе важнее красоты: итог держится в границах 8–16%
+  // годовых. Выше — это уже обещание (разовый щедрый дивиденд не повторяется
+  // годами, а прогноз строится на годы), ниже — отрицание того, что акции
+  // вообще растут. Одной границы достаточно: вторая, на сами выплаты,
+  // оказалась лишней — потолок и так её перекрывал.
+  const FLOOR = 0.08, CEILING = 0.16;
+  const raw = stocksOk ? stockYield + ASSUMED_GROWTH : ASSUMED.stocks;
+  const stocks = stocksOk ? Math.min(CEILING, Math.max(FLOOR, raw)) : ASSUMED.stocks;
+  const capped = stocksOk && raw > CEILING;
+
+  const parts = [];
+  parts.push(bondsOk
+    ? `облигации ${(bondYtm * 100).toFixed(1)}% — фактическая доходность твоих бумаг к погашению`
+    : `облигации ${(ASSUMED.bonds * 100).toFixed(0)}% — допущение, пока биржа не отдала доходность твоих выпусков`);
+  parts.push(stocksOk
+    ? (capped
+        ? `акции ${(stocks * 100).toFixed(1)}% — твои выплаты ${(stockYield * 100).toFixed(1)}% плюс `
+          + `${(ASSUMED_GROWTH * 100).toFixed(0)}% на рост дали бы ${(raw * 100).toFixed(1)}%, но прогноз `
+          + `ограничен ${(CEILING * 100).toFixed(0)}%: такие выплаты редко держатся годами, а обещать их — обманывать`
+        : `акции ${(stocks * 100).toFixed(1)}% — это твои фактические выплаты ${(stockYield * 100).toFixed(1)}% `
+          + `плюс ${(ASSUMED_GROWTH * 100).toFixed(0)}% на рост цены; рост — допущение, его никто не знает`)
+    : `акции ${(ASSUMED.stocks * 100).toFixed(0)}% — допущение`);
+  parts.push(`защита ${(ASSUMED.hedge * 100).toFixed(0)}% — допущение`);
+
   return {
-    rates: { ...ASSUMED, bonds: measured ? bondYtm : ASSUMED.bonds },
-    measured: measured ? ['bonds'] : [],
-    note: measured
-      ? `Облигации — по фактической доходности твоих бумаг к погашению (${(bondYtm * 100).toFixed(1)}%). `
-        + `Акции ${(ASSUMED.stocks * 100).toFixed(0)}% и защита ${(ASSUMED.hedge * 100).toFixed(0)}% — допущения: будущую доходность никто не знает.`
-      : `Доходность принята по историческим допущениям: акции ${(ASSUMED.stocks * 100).toFixed(0)}%, облигации ${(ASSUMED.bonds * 100).toFixed(0)}%, защита ${(ASSUMED.hedge * 100).toFixed(0)}%. `
-        + `Как только биржа отдаст доходность твоих облигаций, она подставится вместо допущения.`
+    rates: { ...ASSUMED, bonds: bondsOk ? bondYtm : ASSUMED.bonds, stocks },
+    measured: [...(bondsOk ? ['bonds'] : []), ...(stocksOk ? ['stocks'] : [])],
+    note: `Считано так: ${parts.join('; ')}.`
   };
 }
 
@@ -2327,6 +2503,36 @@ const CORRELATION = {
 };
 
 /**
+ * Насколько риск собран в немногих бумагах.
+ *
+ * Отдельная акция колеблется сильнее рынка (около 45% против 30%): у неё
+ * есть собственные беды — отчётность, санкции, авария на заводе. В большом
+ * наборе такие беды гасят друг друга, в маленьком — нет.
+ *
+ * Считается по сумме квадратов долей (индекс концентрации): одна бумага
+ * даёт 1, десять равных — 0,1. Разброс акций = σ_одной × √(ρ + (1−ρ)·H),
+ * где ρ — насколько бумаги ходят вместе. При большом наборе получаются
+ * рыночные 30%, при одной бумаге — её собственные 45%.
+ */
+const SINGLE_STOCK_VOL = 0.45;
+const STOCK_CORRELATION = 0.45;
+
+function stockVolatility(positions, stocksValue) {
+  if (!(stocksValue > 0)) return VOLATILITY.stocks;
+  let hhi = 0;
+  for (const p of (positions || [])) {
+    if (allocationClass(p) !== 'stocks') continue;
+    const w = positionValue(p) / stocksValue;
+    hhi += w * w;
+  }
+  if (!(hhi > 0)) return VOLATILITY.stocks;
+  const vol = SINGLE_STOCK_VOL * Math.sqrt(STOCK_CORRELATION + (1 - STOCK_CORRELATION) * hhi);
+  // Ниже рыночного разброса опускаться нельзя: диверсификация убирает
+  // собственные беды компаний, но не общий риск рынка.
+  return Math.max(VOLATILITY.stocks, Math.round(vol * 1000) / 1000);
+}
+
+/**
  * Волатильность портфеля из его состава.
  *
  * Считается по-настоящему — через ковариации, а не средним взвешенным.
@@ -2334,7 +2540,7 @@ const CORRELATION = {
  * падают одновременно и одинаково. На деле смесь колеблется слабее своих
  * частей, и именно эта разница — то, что даёт распределение по классам.
  */
-function portfolioVolatility(byClass, securities) {
+function portfolioVolatility(byClass, securities, positions = null) {
   if (!(securities > 0)) return VOLATILITY.stocks;
   const keys = ['stocks', 'bonds', 'hedge'];
   const w = {}, sigma = {};
@@ -2342,6 +2548,9 @@ function portfolioVolatility(byClass, securities) {
     w[k] = (byClass[k] || 0) / securities;
     sigma[k] = VOLATILITY[k] ?? 0.2;
   }
+  // Если известен состав акций — берём их настоящий разброс: портфель из
+  // четырёх бумаг рискованнее портфеля из тридцати при той же доле акций.
+  if (positions) sigma.stocks = stockVolatility(positions, byClass.stocks || 0);
   let variance = 0;
   for (const i of keys) {
     for (const j of keys) {
@@ -2422,10 +2631,10 @@ function outcomeRange(start, monthly, years, expected, volatility, yearlyBonus =
  * год в плюсе сверх внесённого. Не предсказание конкретного исхода —
  * частота из прогонки случайных сценариев при исторической волатильности.
  */
-function yearOutlook(byClass, securities, monthly = 0, rates) {
+function yearOutlook(byClass, securities, monthly = 0, rates, positions = null) {
   if (!(securities > 0)) return null;
   const expected = expectedReturn(byClass, securities, rates || ASSUMED);
-  const vol = portfolioVolatility(byClass, securities);
+  const vol = portfolioVolatility(byClass, securities, positions);
   const range = outcomeRange(securities, monthly, 1, expected, vol);
   const base = securities + monthly * 12;
   const chance = range.all.filter(v => v > base).length / range.all.length;
@@ -2444,7 +2653,7 @@ function goalProgress(state) {
   const rate = Number(state.settings?.ndflRate) || 0.13;
   const yearlyBonus = Math.min(monthly * 12, 400000) * rate;
   const expected = expectedReturn(state.summary?.byClass || {}, state.summary?.securities || 0,
-    ratesFor(Number(state.settings?.bondYtm) || 0).rates);
+    ratesFor(Number(state.settings?.bondYtm) || 0, Number(state.settings?.stockYield) || 0).rates);
   const reachIn = yearsToGoal(total, monthly, goal, expected, yearlyBonus);
   return {
     goal, total, monthly,
@@ -2484,6 +2693,115 @@ function whatMovesTheNeedle(current, monthly, years, expected, bonus = 0) {
   return { base, levers, strongest: levers[0] || null };
 }
 
+/**
+ * Чего стоит концентрация — в рублях, а не в нравоучениях.
+ *
+ * «Не больше 25% в одной бумаге» — правило, которое легко пропустить мимо
+ * ушей. Здесь считается разница исходов: каким был бы плохой год, если бы
+ * лишнее из крупнейшей бумаги было распределено по остальным акциям.
+ * Ничего не продаётся и не советуется — это сравнение двух портфелей.
+ */
+function concentrationCost({ byClass, securities, positions, monthly = 0, rates, limit = 0.25 }) {
+  if (!(securities > 0) || !positions || !positions.length) return null;
+
+  const stocks = positions.filter(p => allocationClass(p) === 'stocks' && p.qty > 0);
+  if (stocks.length < 2) return null;
+
+  const valued = stocks.map(p => ({ p, v: positionValue(p) }));
+  const biggest = valued.reduce((a, b) => (b.v > a.v ? b : a));
+  const share = biggest.v / securities;
+  if (share <= limit) return null;                 // перекоса нет — считать нечего
+
+  // Портфель-двойник: лишнее переложено в остальные акции пропорционально.
+  const excess = biggest.v - limit * securities;
+  const othersTotal = valued.reduce((a, x) => a + (x === biggest ? 0 : x.v), 0);
+  if (!(othersTotal > 0)) return null;
+  const trimmed = valued.map(x => ({
+    kind: 'stock',
+    qty: 1,
+    price: x === biggest ? x.v - excess : x.v + excess * (x.v / othersTotal)
+  }));
+
+  const volNow = portfolioVolatility(byClass, securities, positions);
+  const volTrim = portfolioVolatility(byClass, securities,
+    [...trimmed, ...positions.filter(p => allocationClass(p) !== 'stocks')]);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
+
+  // Считаем аналитически, а не прогонкой случайных сценариев: разница между
+  // портфелями здесь меньше собственного шума симуляции, и от прогона к
+  // прогону ответ прыгал бы на тысячи рублей. Плохой год — это примерно
+  // доходность минус 1,28 разброса (нижняя десятая часть исходов).
+  const Z = 1.2816;
+  const badCase = vol => futureValue(securities, monthly, expected - Z * vol, 1, 0);
+  const now = { bad: badCase(volNow) };
+  const trim = { bad: badCase(volTrim) };
+
+  return {
+    share, limit,
+    volNow, volTrim,
+    badNow: now.bad, badTrim: trim.bad,
+    // Во сколько обходится перекос в плохой год: разница нижних исходов.
+    // Прогонка случайная, поэтому крохотную разницу считаем шумом.
+    costInBadYear: Math.max(0, Math.round(trim.bad - now.bad)),
+    name: biggest.p.name || biggest.p.ticker
+  };
+}
+
+/**
+ * Насколько облигация подешевеет, если ставка вырастет.
+ *
+ * Главное недоразумение с облигациями: их считают «безрисковыми», а потом
+ * удивляются красной цифре. Риск здесь не в банкротстве государства, а в
+ * ставке: выросла — бумага с прежним купоном стала менее интересной и
+ * подешевела. Величина этого движения известна заранее.
+ *
+ * Считается через дюрацию — средний срок возврата вложенного. Если биржа
+ * её прислала, берём её; если нет, приближаем формулой для бумаги около
+ * номинала, и приближение честно помечается.
+ */
+function rateSensitivity({ ytm, yearsLeft, durationYears = 0, value = 0, step = 0.01 }) {
+  if (!(ytm > 0) || !(yearsLeft > 0)) return null;
+
+  let duration = durationYears > 0 ? durationYears : null;
+  const approximate = duration == null;
+  if (approximate) {
+    // Дюрация Маколея для бумаги у номинала: (1+y)/y × (1 − 1/(1+y)^n).
+    const y = ytm, n = yearsLeft;
+    duration = (1 + y) / y * (1 - 1 / Math.pow(1 + y, n));
+    duration = Math.min(duration, n);        // дюрация не бывает длиннее срока
+  }
+
+  const modified = duration / (1 + ytm);
+  const movePct = modified * step;
+  return {
+    duration, modified, approximate, movePct,
+    moveMoney: value > 0 ? Math.round(value * movePct) : 0,
+    step
+  };
+}
+
+/**
+ * Что цель будет стоить в сегодняшних деньгах.
+ *
+ * Шесть миллионов через пять лет — это не шесть миллионов сегодня.
+ * Инфляция съедает часть, и умалчивать об этом — самый мягкий и самый
+ * распространённый способ обмануть человека: план вроде сходится, а
+ * купить на эти деньги можно меньше задуманного.
+ *
+ * Инфляция — допущение (её будущего не знает никто), поэтому она
+ * настраивается и всегда называется допущением.
+ */
+function inTodaysMoney(amount, years, inflation) {
+  if (!(amount > 0) || !(years > 0) || !(inflation > 0)) return null;
+  return amount / Math.pow(1 + inflation, years);
+}
+
+/** Доходность сверх инфляции: то, на что реально растёт покупательная способность. */
+function realReturn(nominal, inflation) {
+  if (!(inflation > 0)) return nominal;
+  return (1 + nominal) / (1 + inflation) - 1;
+}
+
 /** Вероятность дойти до цели за срок. */
 function chanceOfGoal(range, goal) {
   if (!range?.all?.length || !(goal > 0)) return null;
@@ -2502,13 +2820,13 @@ function gauss() {
  * Полный разбор цели: сходится план или нет, и какие есть рычаги.
  * Возвращает готовый ответ на вопрос «дойду ли я и что менять».
  */
-function analyzeGoal({ current, monthly, goal, years, byClass, securities, taxRefund = 0, rates }) {
+function analyzeGoal({ current, monthly, goal, years, byClass, securities, taxRefund = 0, rates, positions = null }) {
   if (!(goal > 0)) {
     return { hasGoal: false, message: 'Цель не задана — укажи сумму, и я посчитаю план.' };
   }
 
   const expected = expectedReturn(byClass, securities, rates || ASSUMED);
-  const volatility = portfolioVolatility(byClass, securities);
+  const volatility = portfolioVolatility(byClass, securities, positions);
 
   const reachIn = yearsToGoal(current, monthly, goal, expected, taxRefund);
   const needed = requiredMonthly(current, goal, expected, years, taxRefund);
@@ -2556,7 +2874,7 @@ function buildLevers({ current, monthly, goal, years, expected, taxRefund, reach
   return out;
 }
 
-return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle, ratesFor, ASSUMED_RATES: ASSUMED};
+return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle, ratesFor, stockVolatility, concentrationCost, inTodaysMoney, realReturn, rateSensitivity, ASSUMED_RATES: ASSUMED};
 })());
 
 /* ─── data/db.js ─── */
@@ -3279,7 +3597,7 @@ async function fetchAllStocks() {
   const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQBR/securities.json`
     + `?iss.meta=off&iss.only=securities,marketdata`
     + `&securities.columns=SECID,SHORTNAME,PREVPRICE,ISSUESIZE,LOTSIZE,SECTYPE`
-    + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION`, 20000);
+    + `&marketdata.columns=SECID,LAST,MARKETPRICE,ISSUECAPITALIZATION,VALTODAY`, 20000);
   const securities = tableRows(j?.securities);
   const marketdata = tableRows(j?.marketdata);
 
@@ -3295,6 +3613,10 @@ async function fetchAllStocks() {
     out.push({
       ticker: r.SECID, name: r.SHORTNAME || r.SECID, price,
       lot: r.LOTSIZE || 1,
+      // Оборот за день: мера того, насколько легко войти и выйти. Бумагу
+      // без оборота можно купить, но продавать придётся со скидкой —
+      // и эта скидка съест любую расчётную выгоду.
+      turnover: m.VALTODAY > 0 ? m.VALTODAY : 0,
       cap: m.ISSUECAPITALIZATION > 0 ? m.ISSUECAPITALIZATION
          : (r.ISSUESIZE > 0 ? r.ISSUESIZE * price : null)
     });
@@ -3315,21 +3637,24 @@ async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
   if (kinds.includes('corp')) boards.push(['TQCB', 'corp']);
   const out = [];
   for (const [board, type] of boards) {
-    const rows = [], yieldRows = [];
+    const rows = [], yieldRows = [], turnoverRows = [];
     for (let page = 0; page < maxPages; page++) {
       let j;
       try {
         j = await fetchJSON(`${ISS}/engines/stock/markets/bonds/boards/${board}/securities.json`
-          + `?iss.meta=off&iss.only=securities,marketdata_yields&start=${page * 100}`
+          + `?iss.meta=off&iss.only=securities,marketdata_yields,marketdata&start=${page * 100}`
           + `&securities.columns=SECID,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONVALUE,COUPONPERCENT,COUPONPERIOD,FACEVALUE,PREVPRICE`
-          + `&marketdata_yields.columns=SECID,EFFECTIVEYIELD,DURATION`, 15000);
+          + `&marketdata_yields.columns=SECID,EFFECTIVEYIELD,DURATION`
+          + `&marketdata.columns=SECID,VALTODAY`, 15000);
       } catch { break; }
       const secPage = tableRows(j?.securities);
       rows.push(...secPage);
       yieldRows.push(...tableRows(j?.marketdata_yields));
+      turnoverRows.push(...tableRows(j?.marketdata));
       if (secPage.length < 100) break;
     }
     const yields = new Map(yieldRows.map(r => [r.SECID, r]));
+    const turnovers = new Map(turnoverRows.map(r => [r.SECID, r.VALTODAY || 0]));
     for (const r of rows) {
       const y = yields.get(r.SECID) || {};
       const face = r.FACEVALUE > 0 ? r.FACEVALUE : 1000;
@@ -3361,6 +3686,8 @@ async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
         bondKind, bondLabel,
         ytm: y.EFFECTIVEYIELD / 100, yearsLeft, matDate: mat, price, face,
         offerDate: offer, yearsToOffer: yearsToOffer > 0 ? yearsToOffer : null,
+        turnover: turnovers.get(r.SECID) || 0,
+        durationYears: y.DURATION > 0 ? Math.round(y.DURATION / 365 * 100) / 100 : 0,
         coupon: r.COUPONVALUE > 0 ? r.COUPONVALUE : null,
         couponPct: r.COUPONPERCENT > 0 ? r.COUPONPERCENT / 100 : null,
         // Переменный купон биржа помечает пустым значением ближайшего купона:
@@ -3459,12 +3786,48 @@ function payoutStreak(history, now = new Date()) {
   return streak;
 }
 
-/** Фактические выплаты за последние 12 месяцев к текущей цене. */
+/**
+ * Фактические выплаты за год к текущей цене.
+ *
+ * Тонкость, которая стоила приложению правдоподобия: данные биржи по
+ * дивидендам отстают на месяцы. Считать «за последние 12 календарных
+ * месяцев» — значит получать ноль у компаний, которые исправно платят,
+ * и выдавать это за факт о рынке. Поэтому окно считается от ПОСЛЕДНЕЙ
+ * известной выплаты, а вызывающий код получает её дату и может сказать,
+ * насколько данные свежи.
+ */
 function trailingYield(history, price, now = new Date()) {
-  if (!(price > 0) || !history || !history.length) return 0;
-  const since = new Date(now.getTime() - 365 * 86400000).toISOString().slice(0, 10);
-  const sum = history.filter(h => h.date >= since).reduce((a, h) => a + h.value, 0);
-  return sum / price;
+  const r = trailingYieldDetailed(history, price, now);
+  return r ? r.yieldPct : 0;
+}
+
+function trailingYieldDetailed(history, price, now = new Date()) {
+  if (!(price > 0) || !history || !history.length) return null;
+  const sorted = [...history].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const last = sorted[sorted.length - 1];
+  const lastTime = new Date(last.date).getTime();
+  if (!isFinite(lastTime)) return null;
+
+  // Окно — год до последней известной выплаты, но не в будущее.
+  //
+  // 350 дней, а не 365: годовые дивиденды объявляют с шагом чуть меньше
+  // года (реестр то в начале мая, то в конце апреля). При окне ровно в год
+  // прошлогодняя выплата попадала внутрь, и доходность удваивалась.
+  // Полугодовые и квартальные выплаты при этом остаются все.
+  const anchor = Math.min(lastTime, now.getTime());
+  const since = new Date(anchor - 350 * 86400000).toISOString().slice(0, 10);
+  const window = sorted.filter(h => h.date >= since);
+  const sum = window.reduce((a, h) => a + h.value, 0);
+
+  const ageDays = Math.round((now.getTime() - lastTime) / 86400000);
+  return {
+    yieldPct: sum / price,
+    payouts: window.length,
+    lastDate: last.date,
+    ageDays,
+    // Данные старше полутора лет — это уже история, а не «текущая доходность»
+    stale: ageDays > 540
+  };
 }
 
 /**
@@ -3478,6 +3841,23 @@ function fitScore(row, ctx = {}) {
   const targets = ctx.targets || {};
   let score = 0;
   const why = [];
+
+  // Ликвидность — первое, что проверяют перед покупкой. Бумагу без оборота
+  // можно купить, но продавать придётся со скидкой, и эта скидка съест
+  // любую расчётную выгоду. Порог привязан к размеру взноса: продать нужно
+  // будет примерно столько же, сколько покупаешь.
+  const need = Math.max(30000, Number(ctx.tradeSize) || 0);
+  const turnover = Number(row.turnover) || 0;
+  if (row.turnover !== undefined) {
+    if (turnover <= 0) {
+      why.push('сегодня по ней не торговали — выйти будет трудно');
+      score -= 25;
+    } else if (turnover < need * 20) {
+      why.push(`оборот за день ${Math.round(turnover / 1000).toLocaleString('ru-RU')} тыс \u20bd — `
+        + `тонкий рынок, продавать придётся частями`);
+      score -= 15;
+    }
+  }
 
   if (row.kind === 'bond') {
     const rate = ctx.moneyRate || 0.16;
@@ -3515,6 +3895,13 @@ function fitScore(row, ctx = {}) {
     const st = row.streak || 0;
     score += Math.min(25, st * 5);
     if (st >= 3) why.push(`платит ${st} ${st < 5 ? 'года' : 'лет'} подряд`);
+    // Данные биржи по дивидендам отстают: если последняя известная выплата
+    // старая, доходность посчитана по ней, и об этом надо сказать.
+    if (row.payoutStale) {
+      score -= 10;
+      why.push(`последняя известная выплата — ${String(row.payoutLastDate || '').split('-').reverse().join('.')}, `
+        + `данные биржи могут отставать`);
+    }
     if (row.cap > 2e11) { score += 10; why.push('крупная компания'); }
     else if (row.cap > 5e10) score += 5;
   }
@@ -3566,7 +3953,7 @@ function screenBonds(rows, filters = {}, ctx = {}) {
   return out;
 }
 
-return {screenStocks, screenBonds, fitScore, payoutStreak, trailingYield,
+return {screenStocks, screenBonds, fitScore, payoutStreak, trailingYield, trailingYieldDetailed,
         SCREENER_UNAVAILABLE: UNAVAILABLE};
 })());
 
@@ -5471,17 +5858,22 @@ async function cashflowSummary(state) {
   // Средневзвешенная доходность к погашению по своим облигациям: измеренная
   // величина, которая дальше заменяет допущение в прогнозе.
   let bondValue = 0, bondWeighted = 0;
+  let stockValue = 0, stockWeighted = 0;
   for (const r of rows) {
-    if (r.kind !== 'bond' || !(r.ytm > 0)) continue;
     const pos = state.positions.find(p => p.ticker === r.ticker);
     const v = pos ? pos.qty * pos.price : 0;
-    if (v > 0) { bondValue += v; bondWeighted += v * r.ytm; }
+    if (!(v > 0)) continue;
+    if (r.kind === 'bond' && r.ytm > 0) { bondValue += v; bondWeighted += v * r.ytm; }
+    // Дивидендная доходность считается по ВСЕМ акциям, включая неплатящие:
+    // портфель получает выплаты именно так, а не только по щедрым бумагам.
+    if (r.kind === 'stock') { stockValue += v; stockWeighted += v * (r.yieldPct || 0); }
   }
 
   rows.sort((a, b) => (b.perYear || 0) - (a.perYear || 0));
   return {
     rows, totalNet,
     bondYtm: bondValue > 0 ? bondWeighted / bondValue : null,
+    stockYield: stockValue > 0 ? stockWeighted / stockValue : null,
     yieldOnPortfolio: state.summary.securities > 0 ? totalNet / state.summary.securities : 0,
     monthly: Math.round(totalNet / 12)
   };
@@ -5679,10 +6071,14 @@ async function getState() {
     // Ключевая ставка: либо получена от ЦБ, либо вписана вручную. Хранится
     // с датой — устаревшая ставка хуже отсутствующей, о ней надо напомнить.
     keyRate: meta.keyRate && meta.keyRate.rate > 0 ? meta.keyRate : null,
+    // Инфляция — допущение для пересчёта цели в сегодняшние деньги.
+    inflation: meta.inflation > 0 ? meta.inflation : 0.08,
     // Измеренная доходность своих облигаций к погашению. Прогноз подставит
     // её вместо допущения; протухшую (старше месяца) не берём.
     bondYtm: (meta.bondYtm && meta.bondYtm.value > 0
       && daysBetween(meta.bondYtm.date, today()) <= 31) ? meta.bondYtm.value : null,
+    stockYield: (meta.stockYield && meta.stockYield.value > 0
+      && daysBetween(meta.stockYield.date, today()) <= 31) ? meta.stockYield.value : null,
     prices: meta.prices || {},          // последние известные цены
     lots: meta.lots || {},              // размеры лотов: покупают лотами, не штуками
     lastPriceUpdate: meta.lastPriceUpdate || null,
@@ -5755,7 +6151,8 @@ async function getState() {
       years: settings.goal.years,
       byClass: summary.byClass,
       securities: summary.securities,
-      rates: ratesFor(settings.bondYtm || 0).rates,
+      positions,                       // состав важен: риск зависит и от него
+      rates: ratesFor(settings.bondYtm || 0, settings.stockYield || 0).rates,
       taxRefund: Math.round(Math.min(yearContributions(ops), 400000) * settings.ndflRate)
     })
   };
@@ -6225,9 +6622,13 @@ async function findIdeas(kind, filters = {}, opts = {}) {
     if (!hist) { r.streak = 0; r.yieldPct = 0; r.histFailed = true; noAnswer += 1; return; }
     if (!hist.length) { r.streak = 0; r.yieldPct = 0; noPayouts += 1; return; }
     r.streak = reports.payoutStreak(hist);
-    r.yieldPct = reports.trailingYield(hist, r.price);
+    const detail = reports.trailingYieldDetailed(hist, r.price);
+    r.yieldPct = detail ? detail.yieldPct : 0;
+    r.payoutAgeDays = detail ? detail.ageDays : null;
+    r.payoutLastDate = detail ? detail.lastDate : null;
+    r.payoutStale = detail ? detail.stale : false;
     r.lastPayout = hist[hist.length - 1];
-    // Выплаты были, но давно — это не «не платит», а «платила раньше».
+    // Выплаты были, но так давно, что считать их текущими нельзя.
     if (!(r.yieldPct > 0)) oldPayouts += 1;
   });
   // Разбор рынка. «Ничего не подошло» — отказ без вывода: человек не
@@ -6502,6 +6903,10 @@ const allocationClass = SH.allocationClass;
 const analyzeBuy = SH.analyzeBuy;
 const analyzeGoal = SH.analyzeGoal;
 const ratesFor = SH.ratesFor;
+const concentrationCost = SH.concentrationCost;
+const rateSensitivity = SH.rateSensitivity;
+const inTodaysMoney = SH.inTodaysMoney;
+const realReturn = SH.realReturn;
 const applySync = SH.applySync;
 const bondFacts = SH.bondFacts;
 const bondYieldToMaturity = SH.bondYieldToMaturity;
@@ -6835,13 +7240,35 @@ function viewHome(st) {
             ? `При текущем темпе цель придёт примерно через ${g.reachIn} лет — к ${g.etaYear} году. Учтены взносы, налоговый вычет и ожидаемая доходность состава.`
             : `При нынешнем темпе цель дальше пятидесяти лет — загляни в «Что стоит сделать»: там посчитаны рычаги.`}
         </div>
+        ${(() => {
+          const infl = Number(st.settings.inflation) || 0;
+          const years = Number(st.settings.goal?.years) || 0;
+          const goal = Number(st.settings.goal?.amount) || 0;
+          const today = inTodaysMoney(goal, years, infl);
+          if (!today) return '';
+          const exp = store.expectedReturn(st.summary.byClass, st.summary.securities,
+            store.ratesFor(st.settings.bondYtm || 0, st.settings.stockYield || 0).rates);
+          const real = realReturn(exp, infl);
+          return `<div class="muted" style="margin-top:8px;line-height:1.6">
+            ${money(goal)} через ${years} ${years === 1 ? 'год' : years < 5 ? 'года' : 'лет'} —
+            это как <b>${money(today)}</b> сегодня при инфляции ${(infl * 100).toFixed(0)}%.
+            Сверх инфляции портфель растёт примерно на ${(real * 100).toFixed(1)}% в год —
+            именно на столько прибавляется то, что на эти деньги можно купить.
+            Инфляция здесь допущение, её можно изменить в «Ещё».</div>`;
+        })()}
         <div class="muted" style="margin-top:6px;opacity:.7">Это не обещание: будущая доходность неизвестна, разброс исходов — в прогнозе.
-          ${esc(store.ratesFor(st.settings.bondYtm || 0).note)}</div>
+          ${esc(store.ratesFor(st.settings.bondYtm || 0, st.settings.stockYield || 0).note)}
+          ${(() => {
+            const own = store.stockVolatility(st.positions, st.summary.byClass.stocks || 0);
+            if (!(own > 0.31)) return '';
+            return `Разброс твоих акций — ${(own * 100).toFixed(0)}% против рыночных 30%: риск собран `
+              + `в немногих бумагах, и это учтено в расчёте.`;
+          })()}</div>
         ${(() => {
           const years = Number(st.settings.goal?.years) || 0;
           const monthly = Number(st.settings.monthlyContribution) || 0;
           const bonus = Math.min(monthly * 12, 400000) * (Number(st.settings.ndflRate) || 0.13);
-          const r = store.ratesFor(st.settings.bondYtm || 0);
+          const r = store.ratesFor(st.settings.bondYtm || 0, st.settings.stockYield || 0);
           const exp = store.expectedReturn(st.summary.byClass, st.summary.securities, r.rates);
           // Считать рычаги на пять лет, когда цель придёт через год, — вводить
           // в заблуждение: суммы выходят больше самой цели. Берём тот срок,
@@ -7108,7 +7535,8 @@ function renderIdeas(res) {
           m.oldPayouts ? `, платили раньше ${m.oldPayouts}` : ''}${
           m.noPayouts ? `, не платят вовсе ${m.noPayouts}` : ''}${
           m.noAnswer ? `, <span style="color:var(--warn)">история не пришла у ${m.noAnswer}</span>` : ''}.
-        Порог: выплаты за 12 месяцев от 6% и минимум 3 года подряд.
+        Порог: выплаты за год от 6% и минимум 3 года подряд — считаются от последней известной выплаты,
+        потому что данные биржи по дивидендам отстают на месяцы.
       </div>
       ${m.noAnswer >= m.checked / 2 ? `<div class="muted" style="margin-top:8px;line-height:1.65;color:var(--warn)">
         Больше половины историй не пришло — это похоже на сбой связи с биржей, а не на состояние рынка.
@@ -7319,7 +7747,7 @@ function viewSettings(st) {
 
       <div class="rows" style="margin-top:10px">
         <button class="rowitem" id="bKeyRate">
-          <span class="rt"><b>Ключевая ставка ЦБ</b><span>${(() => {
+          <span class="rt"><b>Ключевая ставка и инфляция</b><span>${(() => {
             const k = st.settings.keyRate;
             if (!k) return 'не задана — впиши, приложение сверяется с ней';
             const days = Math.round((Date.now() - new Date(k.date).getTime()) / 86400000);
@@ -7964,6 +8392,21 @@ async function openDiagnostics() {
 async function rememberBondYtm(flow) {
   try {
     if (!flow || !flow.rows) return;
+
+    // Дивидендная доходность своих акций — вторая измеримая величина
+    // прогноза. Считаем её здесь же, по тем же строкам.
+    let sv = 0, sw = 0;
+    for (const r of flow.rows) {
+      if (r.kind !== 'stock') continue;
+      const st = await store.getState();
+      const pos = st.positions.find(p => p.ticker === r.ticker);
+      const v = pos ? pos.qty * pos.price : 0;
+      if (v > 0) { sv += v; sw += v * (r.yieldPct || 0); }
+    }
+    if (sv > 0) {
+      await store.setMeta('stockYield', { date: new Date().toISOString().slice(0, 10), value: sw / sv });
+    }
+
     let value = Number(flow.bondYtm) || 0;
     if (!(value > 0)) {
       // Данные приходят двумя путями — от брокера и с биржи, — и во втором
@@ -8037,6 +8480,7 @@ async function openPlan() {
         contribution: contributionPlan(st, flow),
         moneyRate: market.moneyRate > 0 ? market.moneyRate / 100 : 0,
         rateSource: market.moneyRateSource || null,
+        inflation: Number(st.settings.inflation) || 0,
         yearDeposits: st.yearDeposits || 0
       });
       if (!v) return '';
@@ -8050,6 +8494,13 @@ async function openPlan() {
         </div>`).join('')}
         <div id="verdictSwap"><div class="muted" style="padding:8px 0;border-top:1px solid var(--line);line-height:1.6">
           Сравниваю твои бумаги с рынком — если найдётся выгодная замена, она появится здесь.</div></div>
+        ${v.avoid && v.avoid.length ? `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+          <div style="font-weight:700;font-size:14px;margin-bottom:6px">Чего сейчас делать не надо</div>
+          ${v.avoid.map(a => `<div style="padding:7px 0">
+            <div style="font-weight:600;line-height:1.5">${esc(a.what)}</div>
+            <div class="muted" style="margin-top:3px;line-height:1.6">${esc(a.why)}</div>
+          </div>`).join('')}
+        </div>` : ''}
         <p style="margin-top:10px;line-height:1.65">${esc(v.plan)}</p>
         <p class="muted" style="margin-top:8px;line-height:1.65">${esc(v.caution)}</p>
       </div>`;
@@ -8057,7 +8508,7 @@ async function openPlan() {
 
     ${(() => {
       const yo = yearOutlook(st.summary.byClass, st.summary.securities, 0,
-        store.ratesFor(st.settings.bondYtm || 0).rates);
+        store.ratesFor(st.settings.bondYtm || 0, st.settings.stockYield || 0).rates, st.positions);
       if (!yo) return '';
       return `<div class="act info" style="margin-bottom:10px">
         <h2 style="font-size:16px">Ближайший год — честно о шансах</h2>
@@ -8097,6 +8548,10 @@ async function openPlan() {
       const card = a => `<div class="act ${a.urgency}" style="margin-bottom:10px">
         <h2 style="font-size:16px">${esc(a.title)}</h2>
         <p>${esc(a.detail)}</p>
+        ${a.cost ? `<p class="muted" style="margin-top:6px;line-height:1.6">Чего это стоит числом: из-за перекоса
+          разброс портфеля ${(a.cost.volNow * 100).toFixed(1)}% вместо ${(a.cost.volTrim * 100).toFixed(1)}%,
+          и в плохой год разница примерно <b>${money(a.cost.costInBadYear)}</b>. Это не потеря, а плата за то,
+          что судьба портфеля сильнее зависит от одной компании.</p>` : ''}
         ${a.note ? `<p class="muted" style="margin-top:8px">${esc(a.note)}</p>` : ''}
       </div>`;
       // Три карточки — читаются; десять подряд — пролистываются. Хвост
@@ -8300,6 +8755,11 @@ async function openKeyRate() {
     <label>С какой даты действует</label>
     <input type="date" id="fKeyRateDate" value="${k ? k.date : new Date().toISOString().slice(0, 10)}">
 
+    <label>Инфляция, % в год (допущение)</label>
+    <input type="number" id="fInflation" inputmode="decimal" step="0.5" value="${((st.settings.inflation || 0.08) * 100).toFixed(1)}">
+    <p class="muted" style="margin:6px 0 0;line-height:1.6">Нужна, чтобы пересчитать цель в сегодняшние деньги.
+      Будущую инфляцию не знает никто — это допущение, и приложение всегда называет его допущением.</p>
+
     <button class="btn wide" id="bKeyRateSave" style="margin-top:12px">Сохранить</button>
     <button class="btn ghost wide" id="bKeyRateFetch" style="margin-top:8px">Попробовать взять у ЦБ</button>
     <div id="keyRateOut"></div>
@@ -8313,6 +8773,8 @@ async function openKeyRate() {
     const value = Number($('fKeyRate').value);
     const date = $('fKeyRateDate').value || new Date().toISOString().slice(0, 10);
     if (!(value > 0 && value < 100)) { $('fKeyRate').focus(); return alert('Ставка должна быть от 0 до 100%'); }
+    const infl = Number($('fInflation').value);
+    if (infl >= 0 && infl < 100) await store.setMeta('inflation', infl / 100);
     await store.setMeta('keyRate', { rate: value / 100, date, source: 'вручную', checked: null });
     closeSheet(); render();
   };
@@ -8430,6 +8892,15 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('Проверка ликвидности', 'Бумагу без оборота можно купить, но продать — только со скидкой, которая съест всю расчётную выгоду. Теперь оборот учитывается в оценке, а замены на неликвид не предлагаются вовсе.')}
+    ${item('Облигации: цена ходит за ставкой', 'Приложение считает заранее, на сколько подешевеет твоя ОФЗ при росте ставки на процентный пункт — и сразу снимает главный страх: при удержании до погашения эти колебания не важны, номинал вернут.')}
+    ${item('Замечает отсутствие защиты от инфляции', 'Если цель дальше трёх лет, а в портфеле нет облигаций с индексируемым номиналом, приложение скажет: весь доход номинальный, и покажет, сколько остаётся сверх инфляции. Без давления — просто чтобы ты знал, что такой инструмент есть.')}
+    ${item('Цель — в сегодняшних деньгах', 'Шесть миллионов через пять лет — это не шесть миллионов сегодня. Приложение показывает, сколько цель стоит по покупательной способности, и какая доходность остаётся сверх инфляции. Саму инфляцию можно поправить в «Ещё».')}
+    ${item('Прогноз по акциям — из твоих выплат', 'Ожидаемая доходность акций больше не плоские 13%: берутся фактические выплаты твоих бумаг плюс допущение о росте цены, а итог ограничен 16% годовых — выше это уже обещание, а не расчёт.')}
+    ${item('Концентрация — в рублях', 'Карточка «одна бумага — треть портфеля» теперь показывает, чего это стоит числом: насколько выше разброс и какая разница в плохой год, если бы доля была в пределах лимита.')}
+    ${item('Риск считается по составу, а не по классам', 'Портфель из четырёх бумаг рискованнее портфеля из тридцати при той же доле акций. Разброс твоих акций — 36% против рыночных 30%, и это теперь учтено в прогнозе и шансах года.')}
+    ${item('Чего сейчас делать не надо', 'В вердикте появился раздел запретов, и каждый опирается на число из твоего портфеля: не докупать бумагу за пределом доли, не продавать просевшую просто из-за минуса, не держать деньги без дела при высокой ставке, не закрывать ИИС раньше срока.')}
+    ${item('Дивиденды считаются от последней выплаты', 'Данные биржи по дивидендам отстают на месяцы, и «за последние 12 календарных месяцев» давало ноль у компаний, которые исправно платят. Теперь окно считается от последней известной выплаты, а её дата и возраст показываются.')}
     ${item('«Никто не платит» — теперь с разбором', 'Приложение различает три исхода: биржа не ответила, компания не платит, платила раньше. Если больше половины историй не пришло, оно прямо говорит, что это похоже на сбой связи, а не на состояние рынка.')}
     ${item('Выплаты из запасного источника', 'Если биржа молчит о выплатах по бумаге, которую ты уже держишь, берутся данные брокера — тот же факт, просто из другого источника.')}
     ${item('Советы больше не прыгают', 'Когда подгружаются замены, вердикт дополняется только отведённым им местом, а не пересобирается целиком — текст под пальцем перестал меняться во время чтения.')}
@@ -8466,7 +8937,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 167 автоматических проверок и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 176 автоматических проверок и 110 мутационных, все зелёные.</p>`);
 }
 
 /**
