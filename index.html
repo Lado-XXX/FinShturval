@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-07-30az</title>
+<title>Штурвал · 2026-07-30bb</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-07-30az';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-07-30bb';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -1871,6 +1871,7 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       out.push({
         kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
         how: howTo(p.name, best.c.name, false),
+        toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
         title: `${p.name} → ${best.c.name} (денежный рынок)`,
         detail: `Твоя бумага даёт ${(mine.ytm * 100).toFixed(1)}% к погашению, денежный рынок — около `
           + `${(best.c.ytm * 100).toFixed(1)}% прямо сейчас. На позиции в ${rub(value)} разница примерно `
@@ -1886,6 +1887,7 @@ function replacementIdeas(state, candidates = [], opts = {}) {
     out.push(best.kind === 'bonds' ? {
       kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
       how: howTo(p.name, best.c.name, true),
+      toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
       title: `${p.name} → ${best.c.name}`,
       detail: `${(mine.ytm * 100).toFixed(1)}% против ${(best.c.ytm * 100).toFixed(1)}% к погашению. `
         + `На твоей позиции в ${rub(value)} разница даёт около ${rub(best.gain)} в год; `
@@ -1897,6 +1899,7 @@ function replacementIdeas(state, candidates = [], opts = {}) {
     } : {
       kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
       how: howTo(p.name, best.c.name, false),
+      toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
       title: `${p.name} → ${best.c.name}`,
       detail: `Выплаты за 12 месяцев: ${((mine.yieldPct || 0) * 100).toFixed(1)}% против ${(best.c.yieldPct * 100).toFixed(1)}%, `
         + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд. На позиции в ${rub(value)} `
@@ -4412,8 +4415,13 @@ const TI_KIND = {
  * Возвращает операции в том же виде, в каком их даёт разбор отчётов, —
  * дальше они идут по общему пути.
  */
-async function tiOperations(token, accountId, from = '2000-01-01') {
+async function tiOperations(token, accountId, from = '2000-01-01', known = {}) {
+  // `known` — ранее выясненные имена бумаг. Без них при молчании брокера в
+  // ЖУРНАЛ попадали технические коды, сверка потом не сходилась, и человек
+  // видел список «у нас BBG…, у брокера МТС». Данные при этом были целы —
+  // расходились только имена.
   const cache = new Map();
+  let unresolved = 0;
   const raw = [];
   let cursor = '', guard = 0;
 
@@ -4443,7 +4451,13 @@ async function tiOperations(token, accountId, from = '2000-01-01') {
     if (kind === 'buy' || kind === 'sell') {
       const qty = Math.abs(Number(it.quantityDone || it.quantity || 0));
       if (!(qty > 0) || !(payment > 0)) { skipped.push(it.description || it.type); continue; }
-      const sec = await tiInstrument(token, it.instrumentUid, cache);
+      let sec = null;
+      try { sec = await tiInstrument(token, it.instrumentUid, cache); } catch { sec = null; }
+      if (!(sec && sec.ticker)) {
+        const remembered = known[it.instrumentUid];
+        if (remembered && remembered.ticker) sec = remembered;
+        else unresolved += 1;
+      }
       const ticker = sec && sec.ticker ? sec.ticker : (it.figi || '').toUpperCase();
       if (!ticker) { skipped.push(it.description || it.type); continue; }
       feesInTrades += commission;
@@ -4486,7 +4500,7 @@ async function tiOperations(token, accountId, from = '2000-01-01') {
     for (const f of feesSeparate) if (f.amount > 0) cash.push({ type: 'fee', ...f, note: 'комиссия' });
   }
 
-  return { trades, cash, skipped: [...new Set(skipped)], total: raw.length };
+  return { trades, cash, skipped: [...new Set(skipped)], total: raw.length, unresolved };
 }
 
 /** Портфель и остаток по версии брокера — для сверки того, что мы насчитали. */
@@ -6143,7 +6157,7 @@ async function refreshKeyRate() {
   return stored || null;
 }
 
-async function findIdeas(kind, filters = {}) {
+async function findIdeas(kind, filters = {}, opts = {}) {
   marketStage = 'связь с биржей';
   if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
   marketStage = 'ставка денежного рынка';
@@ -6200,12 +6214,21 @@ async function findIdeas(kind, filters = {}) {
     .slice(0, 30);          // биржа отвечает за доли секунды — можно смотреть шире
   marketStage = 'истории выплат';
   const histories = await mapLimit(rough, 6, r => moex.fetchDividendHistory(r.ticker));
+
+  // Три разных исхода, которые нельзя путать: биржа не ответила, ответила
+  // пустотой (компания не платит) и ответила выплатами. Раньше все три
+  // давали ноль, и «платят хоть что-то 0» выглядело как факт о рынке,
+  // хотя могло означать поломку связи.
+  let noAnswer = 0, noPayouts = 0, oldPayouts = 0;
   rough.forEach((r, i) => {
     const hist = histories[i];
-    if (!hist) { r.streak = 0; r.yieldPct = 0; return; }
+    if (!hist) { r.streak = 0; r.yieldPct = 0; r.histFailed = true; noAnswer += 1; return; }
+    if (!hist.length) { r.streak = 0; r.yieldPct = 0; noPayouts += 1; return; }
     r.streak = reports.payoutStreak(hist);
     r.yieldPct = reports.trailingYield(hist, r.price);
-    r.lastPayout = hist.length ? hist[hist.length - 1] : null;
+    r.lastPayout = hist[hist.length - 1];
+    // Выплаты были, но давно — это не «не платит», а «платила раньше».
+    if (!(r.yieldPct > 0)) oldPayouts += 1;
   });
   // Разбор рынка. «Ничего не подошло» — отказ без вывода: человек не
   // понимает, планка ли высока или рынок такой. Считаем картину: сколько
@@ -6216,10 +6239,27 @@ async function findIdeas(kind, filters = {}) {
     .slice(0, 3)
     .map(r => ({ ticker: r.ticker, name: r.name, yieldPct: r.yieldPct, streak: r.streak || 0 }));
 
+  // Если биржа не отдала историю, но выплаты по этой бумаге знает брокер
+  // (она есть в портфеле) — берём его данные. Это тот же факт, просто из
+  // другого источника, и он честнее пустоты.
+  if (noAnswer > 0 && Array.isArray(opts.knownYields)) {
+    for (const r of rough) {
+      if (!r.histFailed) continue;
+      const known = opts.knownYields.find(k => k.ticker === r.ticker);
+      if (known && known.yieldPct > 0) {
+        r.yieldPct = known.yieldPct;
+        r.streak = known.streak || 0;
+        r.fromBroker = true;
+        noAnswer -= 1;
+      }
+    }
+  }
+
   marketStage = null;
   return {
     rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx,
     market: { onBoard: all.length, checked: rough.length, paying: paying.length,
+              noAnswer, noPayouts, oldPayouts,
               best: nearMiss[0] || null, nearMiss }
   };
 }
@@ -6340,9 +6380,14 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   await db.setMeta('journalBackup', { at: Date.now(), ops: before });
   let ops, book;
   try {
-    ops = await tiOperations(token, accountId);
+    // Сначала портфель: он пополняет запас имён, которым потом пользуются
+    // операции. В обратном порядке журнал успевал набрать технические коды.
     book = await tiPortfolio(token, accountId, (await db.getMeta('uidTickers')) || {});
     if (book && book.resolved && Object.keys(book.resolved).length) {
+      await db.setMeta('uidTickers', { ...((await db.getMeta('uidTickers')) || {}), ...book.resolved });
+    }
+    ops = await tiOperations(token, accountId, '2000-01-01', (await db.getMeta('uidTickers')) || {});
+    if (false) {
       await db.setMeta('uidTickers', { ...((await db.getMeta('uidTickers')) || {}), ...book.resolved });
     }
   } catch (err) {
@@ -6355,7 +6400,18 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   // Записать такой журнал значит испортить данные: половина сделок ляжет
   // под кодом, половина под тикером, и сверка будет ругаться вечно.
   // Лучше не трогать журнал совсем и попросить повторить.
-  if (book && book.unresolved > 0) {
+  if ((ops && ops.unresolved > 0) || (book && book.unresolved > 0)) {
+    const missing = Math.max(ops?.unresolved || 0, book?.unresolved || 0);
+    await db.setMeta('journalBackup', null);
+    const msg = `Брокер не назвал имена ${missing} ${missing === 1 ? 'бумаги' : 'бумаг'} — журнал не тронут, `
+      + `чтобы в нём не смешались имена и технические коды. Обнови ещё раз через минуту: `
+      + `чаще всего это временный отказ на стороне брокера.`;
+    await db.setMeta('tiProblem', [msg]);
+    if (!silent) notify();
+    return { ok: false, problems: [msg], unresolved: missing };
+  }
+
+  if (false) {
     await db.setMeta('journalBackup', null);
     const msg = `Брокер не назвал ${book.unresolved} ${book.unresolved === 1 ? 'бумагу' : 'бумаги'} — `
       + `журнал не тронут, чтобы не смешать имена с техническими кодами. Обнови ещё раз.`;
@@ -7048,9 +7104,15 @@ function renderIdeas(res) {
     return `<div class="card">
       <h3>Ни одна акция не прошла отбор</h3>
       <div class="muted" style="line-height:1.65">
-        На бирже ${m.onBoard} акций. Проверены выплаты у ${m.checked} крупнейших —
-        платят хоть что-то ${m.paying}. Порог: выплаты за 12 месяцев от 6% и минимум 3 года подряд.
+        На бирже ${m.onBoard} акций. Проверены ${m.checked} крупнейших: платят за последний год ${m.paying}${
+          m.oldPayouts ? `, платили раньше ${m.oldPayouts}` : ''}${
+          m.noPayouts ? `, не платят вовсе ${m.noPayouts}` : ''}${
+          m.noAnswer ? `, <span style="color:var(--warn)">история не пришла у ${m.noAnswer}</span>` : ''}.
+        Порог: выплаты за 12 месяцев от 6% и минимум 3 года подряд.
       </div>
+      ${m.noAnswer >= m.checked / 2 ? `<div class="muted" style="margin-top:8px;line-height:1.65;color:var(--warn)">
+        Больше половины историй не пришло — это похоже на сбой связи с биржей, а не на состояние рынка.
+        Открой «Ещё» → «Диагностика» → «Проверить доступ к бирже» и попробуй ещё раз.</div>` : ''}
       ${m.nearMiss.length ? `<div style="margin-top:10px">
         <div class="muted" style="margin-bottom:6px">Ближе всех, но мимо порога:</div>
         ${m.nearMiss.map(x => `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line)">
@@ -7986,6 +8048,8 @@ async function openPlan() {
           <div class="muted" style="margin-top:4px;line-height:1.6">${esc(x.why)}</div>
         ${x.how ? `<div style="margin-top:6px">${x.how.map((h, k) => `<div class="muted" style="line-height:1.55;padding:2px 0;opacity:.9">— ${esc(h)}</div>`).join('')}</div>` : ''}
         </div>`).join('')}
+        <div id="verdictSwap"><div class="muted" style="padding:8px 0;border-top:1px solid var(--line);line-height:1.6">
+          Сравниваю твои бумаги с рынком — если найдётся выгодная замена, она появится здесь.</div></div>
         <p style="margin-top:10px;line-height:1.65">${esc(v.plan)}</p>
         <p class="muted" style="margin-top:8px;line-height:1.65">${esc(v.caution)}</p>
       </div>`;
@@ -8099,7 +8163,12 @@ async function openPlan() {
         : kind === 'bonds'
         ? { minYTM: Math.max(0.10, rate - 0.01), maxYears: goalYears || 5 }
         : { minYield: 0.06, minStreak: 3 };
-      const res = await withLimit(store.findIdeas(kind, filters), 45, null);
+      // Выплаты по своим бумагам уже посчитаны — отдаём их поиску как
+      // запасной источник на случай, если биржа промолчит.
+      const knownYields = (flow.rows || [])
+        .filter(x => x.yieldPct > 0)
+        .map(x => ({ ticker: x.ticker, yieldPct: x.yieldPct, streak: x.streak || 0 }));
+      const res = await withLimit(store.findIdeas(kind, filters, { knownYields }), 45, null);
       if (!box.isConnected && !box.innerHTML) return;      // лист закрыли — молча уходим
       if (!res) {
         const stage = store.lastMarketStage();
@@ -8147,8 +8216,24 @@ async function openPlan() {
       bindIdeaButtons();
 
       // Вердикт составлен до ответа биржи. Появилась выгодная замена —
-      // пересобираем его, чтобы совет был один и полный, а не в двух местах.
-      if (r.ideas && r.ideas.length) {
+      // дополняем ТОЛЬКО отведённое ей место. Раньше пересобирался весь
+      // вердикт, и текст под пальцем менялся прямо во время чтения:
+      // человек листал, а карточки прыгали.
+      const slot = $('verdictSwap');
+      if (slot && r.ideas && r.ideas.length) {
+        const x = r.ideas[0];
+        slot.innerHTML = `<div style="padding:8px 0;border-top:1px solid var(--line)">
+          <div style="font-weight:650;line-height:1.5">Ещё: поменять ${esc(x.title)}</div>
+          <div class="muted" style="margin-top:4px;line-height:1.6">${esc(x.detail)}</div>
+          <button class="btn ghost wide" data-swap="0" style="margin-top:8px">Как сделать этот обмен</button>
+        </div>`;
+        bindIdeaButtons();
+      } else if (slot) {
+        slot.innerHTML = `<div class="muted" style="padding:8px 0;border-top:1px solid var(--line);line-height:1.6">
+          Замен, которые окупали бы комиссии, на рынке сейчас нет — это тоже ответ.</div>`;
+      }
+
+      if (false) {
         const vb = $('verdictBox');
         if (vb) {
           const stNow = await store.getState();
@@ -8345,6 +8430,11 @@ function openWhatsNew() {
     ${item('Две доходности в «Итогах»', 'Сколько заработали твои деньги (XIRR) и как сработал сам портфель без влияния дат взносов (TWR) — вторую честно сравнивать с индексом.')}
     ${item('Порог качества интерфейса', 'Цифры одной ширины — колонки не прыгают при обновлении цен; фокус виден с клавиатуры на всём; системная настройка «уменьшить движение» уважается целиком.')}
     ${item('Лоты приходят от брокера', 'Размер лота теперь берётся вместе с ценой из Т-Инвестиций — план перестанет советовать «111 шт» там, где лот равен десяти.')}
+    ${item('«Никто не платит» — теперь с разбором', 'Приложение различает три исхода: биржа не ответила, компания не платит, платила раньше. Если больше половины историй не пришло, оно прямо говорит, что это похоже на сбой связи, а не на состояние рынка.')}
+    ${item('Выплаты из запасного источника', 'Если биржа молчит о выплатах по бумаге, которую ты уже держишь, берутся данные брокера — тот же факт, просто из другого источника.')}
+    ${item('Советы больше не прыгают', 'Когда подгружаются замены, вердикт дополняется только отведённым им местом, а не пересобирается целиком — текст под пальцем перестал меняться во время чтения.')}
+    ${item('Ошибки при обновлении от брокера', 'Имена бумаг в истории операций теперь берутся из общего запаса. Если брокер молчит, журнал не трогается вовсе и приложение объясняет причину вместо списка расхождений.')}
+    ${item('План обмена знает цену новой бумаги', 'Цена, лот и название приходят вместе с самой заменой — количество к покупке считается сразу, без второго похода на биржу.')}
     ${item('Обновление стало видимым', 'В «Диагностике» теперь показано, какая сборка лежит на сервере, и есть кнопка «Обновить приложение сейчас» — она пробивает все копии. Служебный файл офлайн-режима больше не кэширует саму страницу.')}
     ${item('План конкретного обмена', 'Нажми «Как сделать этот обмен» — и получишь план с твоими числами: сколько штук продать и по какой цене не ниже, сколько купить, что останется, во что обойдутся комиссии.')}
     ${item('Ключевая ставка — отдельно и честно', '«Ещё» → «Ключевая ставка ЦБ»: приложение пробует взять её у Банка России, а если браузер не пустит — принимает от тебя, с датой и напоминанием, когда пора проверить. Подменять её ставкой денежного рынка оно не станет.')}
@@ -8376,7 +8466,7 @@ function openWhatsNew() {
     ${item('Прогноз считает по твоим бумагам', 'Доходность облигаций больше не берётся из справочника: подставляется фактическая доходность твоих выпусков к погашению. Что измерено, а что принято на веру — написано под карточкой цели.')}
     ${item('Поиск бумаг — внутри «Что стоит сделать»', 'Отдельной вкладки нет: облигации, акции и замены ищутся прямо в плане, а условия отбора приложение берёт из твоей стратегии, срока цели и ставки — настраивать ничего не нужно.')}
     ${item('Разместить в интернете', 'Мастер на 5 минут в «Ещё»: после выкладки заработают база, котировки, «Идеи», «Против индекса» и иконка на экране.')}
-    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 164 автоматические проверки и 108 мутационных, все зелёные.</p>`);
+    <p class="muted" style="margin-top:12px;opacity:.75">Проверено: 167 автоматических проверок и 108 мутационных, все зелёные.</p>`);
 }
 
 /**
@@ -8504,12 +8594,18 @@ async function openSwapPlan(index) {
   openSheet('<div class="muted">Считаю план обмена…</div>');
 
   const st = await store.getState();
-  // Цена и лот новой бумаги — с биржи; без них план был бы гаданием.
-  let buyPrice = 0, buyLot = 1, toName = idea.to;
-  const d = await withLimit(store.getSecurityDetails(idea.to), 10, null);
-  if (d && d.facts) {
-    buyPrice = Number(d.facts.price) || 0;
-    toName = d.facts.name || idea.to;
+  // Цена, лот и название новой бумаги уже известны: их принёс поиск замен.
+  // Ходить за ними второй раз — терять время и рисковать пустым ответом,
+  // из-за чего план раньше выходил без количества.
+  let buyPrice = Number(idea.toPrice) || 0;
+  let buyLot = Number(idea.toLot) || 1;
+  let toName = idea.toName || idea.to;
+  if (!(buyPrice > 0)) {
+    const d = await withLimit(store.getSecurityDetails(idea.to), 10, null);
+    if (d && d.facts) {
+      buyPrice = Number(d.facts.price) || 0;
+      toName = d.facts.name || toName;
+    }
   }
   const plan = SH.swapPlan(st, idea, { buyPrice, buyLot, toName });
   if (!plan) { openSheet('<div class="muted">Не получилось собрать план: бумага не найдена в портфеле.</div>'); return; }
