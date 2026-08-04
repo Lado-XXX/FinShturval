@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-03l</title>
+<title>Штурвал · 2026-08-03m</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-03l';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03m';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -8675,8 +8675,11 @@ async function openDiagnostics() {
         ${note ? `<div class="muted" style="margin-top:8px;line-height:1.6">${esc(note)}</div>` : ''}</div>`;
     };
 
-    if (!token) { out.innerHTML = '<div class="muted" style="margin:8px 0">Токена нет — проверять нечего.</div>';
-                  probeTi.disabled = false; return; }
+    // Токен нужен, только чтобы проверить сам токен. Дошёл ли запрос до
+    // брокера — вопрос сети, и отвечать на него без секрета обязательно:
+    // именно в чистом окне браузера, где токена ещё нет, и приходится
+    // выяснять, почему связи нет. Раньше проверка тут просто отказывалась
+    // работать — ровно там, где была нужнее всего.
 
     let reached = false, refused = false, blocked = false;
     for (const host of hosts) {
@@ -8703,7 +8706,8 @@ async function openDiagnostics() {
                   error: alive ? '' : 'до адреса не достучаться: сеть, DNS или блокировка' });
       draw('Проверяю…');
 
-      rows.push({ name: `${name} — запрос с токеном`, ok: false, ms: 0, error: 'идёт запрос…' });
+      const label = `${name} — запрос ${token ? 'с токеном' : 'без токена'}`;
+      rows.push({ name: label, ok: false, ms: 0, error: 'идёт запрос…' });
       draw('Проверяю…');
       const started = Date.now();
       try {
@@ -8711,20 +8715,28 @@ async function openDiagnostics() {
         const timer = setTimeout(() => controller.abort(), 10000);
         const res = await fetch(`${host}/tinkoff.public.invest.api.contract.v1.UsersService/GetAccounts`, {
           method: 'POST', signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          headers: token
+            ? { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }
+            : { 'Content-Type': 'application/json' },
           body: '{}'
         });
         clearTimeout(timer);
         reached = true;
-        if (!res.ok) {
+        // Без токена отказ 401 — это УСПЕХ проверки: запрос дошёл, брокер
+        // на связи и ответил по существу. Проверять было нечего только
+        // про сам токен.
+        if (!token && (res.status === 401 || res.status === 403)) {
+          rows[rows.length - 1] = { name: label, ok: true, ms: Date.now() - started };
+        } else if (!res.ok) {
           refused = true;
           throw new Error(res.status === 401 || res.status === 403
             ? `отказ ${res.status}: токен не принят — отозван, истёк или скопирован не целиком`
             : res.status === 429 ? 'отказ 429: слишком много запросов, подожди минуту'
             : `брокер ответил кодом ${res.status}`);
+        } else {
+          await res.json();
+          rows[rows.length - 1] = { name: label, ok: true, ms: Date.now() - started };
         }
-        await res.json();
-        rows[rows.length - 1] = { name: `${name} — запрос с токеном`, ok: true, ms: Date.now() - started };
       } catch (err) {
         // Адрес отвечает, а запрос падает — значит брокер не пускает
         // страницу. Ни токен, ни сеть тут ни при чём.
@@ -8732,15 +8744,16 @@ async function openDiagnostics() {
         const msg = err && err.name === 'AbortError' ? 'не ответил за 10 с'
           : alive && !reached ? 'адрес отвечает, но запрос со страницы не пропущен'
           : (err && err.message ? err.message : String(err));
-        rows[rows.length - 1] = { name: `${name} — запрос с токеном`, ok: false,
-                                  ms: Date.now() - started, error: msg };
+        rows[rows.length - 1] = { name: label, ok: false, ms: Date.now() - started, error: msg };
       }
       draw('Проверяю…');
     }
 
-    const anyOk = rows.some(r => r.ok && / запрос с токеном$/.test(r.name));
+    const anyOk = rows.some(r => r.ok && / запрос (с|без) токеном?$/.test(r.name));
     draw(anyOk
-      ? 'Брокер доступен и токен принят. Если журнал всё равно не обновляется — покажи этот экран разработчику.'
+      ? (token
+          ? 'Брокер доступен и токен принят. Если журнал всё равно не обновляется — покажи этот экран разработчику.'
+          : 'Брокер доступен: запрос дошёл и получил ответ. Токен не проверялся — его здесь нет.')
       : refused
         ? 'Запрос доходит, но брокер отказывает — дело в токене или в лимите, а не в сети. '
           + 'Токен выпускается заново в приложении Т-Инвестиций.'
