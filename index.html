@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-03h</title>
+<title>Штурвал · 2026-08-03l</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-03h';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-03l';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -3053,9 +3053,23 @@ function runInMemory(store, mode, fn) {
   return Promise.resolve(value);
 }
 
+/**
+ * Открыт ли файл локально, а не по ссылке.
+ *
+ * Проверять надо `http`, а не `file:`. Браузеры открывают скачанный файл
+ * и по своим внутренним адресам — `content:` в Яндекс.Браузере на Android,
+ * `blob:` в других. Условие «не file: — значит по ссылке» объявляло такой
+ * файл страницей с сервера: диагностика писала «страница по ссылке», а
+ * соседняя строка тут же возражала «открыто не по ссылке». Обе смотрели
+ * на один и тот же адрес и приходили к разным выводам.
+ */
+function openedLocally() {
+  return typeof location === 'undefined' || !String(location.protocol || '').startsWith('http');
+}
+
 /** Почему база недоступна — человеческим языком, а не кодом ошибки. */
 function explainStorage(err) {
-  const local = typeof location !== 'undefined' && location.protocol === 'file:';
+  const local = openedLocally();
   return local
     ? 'Файл открыт напрямую с устройства, а в таком режиме браузер запрещает странице '
       + 'постоянную базу. Приложение работает, но данные держатся в памяти браузера '
@@ -3311,7 +3325,7 @@ async function migrateFromLocalStorage(legacyState) {
 
 function storageState() { return { mode: storageMode, reason: storageReason }; }
 
-return {BUILD_ID, storageState, addOp, addOps, deleteOp, allOps, opsBetween, opsByTicker, savePrices, priceHistory, valueHistory, getMeta, setMeta, allMeta, exportAll, importAll, storageInfo, requestPersistence, migrateFromLocalStorage};
+return {BUILD_ID, openedLocally, storageState, addOp, addOps, deleteOp, allOps, opsBetween, opsByTicker, savePrices, priceHistory, valueHistory, getMeta, setMeta, allMeta, exportAll, importAll, storageInfo, requestPersistence, migrateFromLocalStorage};
 })());
 
 /* ─── data/moex.js ─── */
@@ -3395,8 +3409,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
     if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
     // При открытии файла напрямую (file://) браузер запрещает запросы наружу.
     // Ошибка сети в этом случае неотличима от отсутствия интернета — различаем по адресу.
-    err.reason = (typeof location !== 'undefined' && location.protocol === 'file:')
-      ? FAIL.BLOCKED : FAIL.OFFLINE;
+    err.reason = openedLocally() ? FAIL.BLOCKED : FAIL.OFFLINE;
     throw err;
   } finally {
     clearTimeout(timer);
@@ -5788,8 +5801,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
     if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
     // При открытии файла напрямую (file://) браузер запрещает запросы наружу.
     // Ошибка сети в этом случае неотличима от отсутствия интернета — различаем по адресу.
-    err.reason = (typeof location !== 'undefined' && location.protocol === 'file:')
-      ? FAIL.BLOCKED : FAIL.OFFLINE;
+    err.reason = openedLocally() ? FAIL.BLOCKED : FAIL.OFFLINE;
     throw err;
   } finally {
     clearTimeout(timer);
@@ -7060,11 +7072,30 @@ async function syncTinvest({ silent = false, force = false } = {}) {
       { positions: rebuildPositions(all).filter(p => p.qty > 0), cash: rebuildCash(all) }, book);
   };
 
+  // РЕЗЕРВ ПЕРЕЖИВАЕТ ЛЮБУЮ ПЕРЕСБОРКУ. Подушка лежит вне брокерского
+  // счёта, в истории брокера её нет и быть не может, а значит пересборка
+  // «начисто» стирает её вместе с суммой, которую человек вносил руками.
+  //
+  // Раньше её берёг фильтр при удалении — в каждой из трёх веток свой.
+  // Три копии одного правила: достаточно забыть фильтр в одной ветке, и
+  // подушка исчезает молча. Теперь удаление везде безусловное, а правило
+  // одно и стоит после пересборки: записи резерва откладываются заранее
+  // и возвращаются, сколько бы их ни было.
+  const reserveOps = before.filter(o => o.type === OP.RESERVE);
+  const restoreReserve = async () => {
+    if (!reserveOps.length) return;
+    const now = await db.allOps();
+    const have = new Set(now.filter(o => o.type === OP.RESERVE).map(o => o.id));
+    const lost = reserveOps.filter(o => !have.has(o.id));
+    if (lost.length) await db.addOps(lost);
+  };
+
   // force — журнал заведомо сомнителен: не дополняем его, а собираем заново.
   if (force) {
     const all = await db.allOps();
-    for (const o of all) if (o.type !== OP.RESERVE) await db.deleteOp(o.id);
+    for (const o of all) await db.deleteOp(o.id);
     await db.addOps(draft);
+    await restoreReserve();
   } else {
     await importTrades(ops.trades, ops.cash);
   }
@@ -7074,8 +7105,9 @@ async function syncTinvest({ silent = false, force = false } = {}) {
   // из истории брокера: она полная, других источников не требуется.
   if (!check.ok) {
     const all = await db.allOps();
-    for (const o of all) if (o.type !== OP.RESERVE) await db.deleteOp(o.id);
+    for (const o of all) await db.deleteOp(o.id);
     await db.addOps(draft);
+    await restoreReserve();
     check = await checkJournal();
   }
 
@@ -7085,6 +7117,7 @@ async function syncTinvest({ silent = false, force = false } = {}) {
     const all = await db.allOps();
     for (const o of all) await db.deleteOp(o.id);
     await db.addOps(before);
+    await restoreReserve();
     await db.setMeta('journalBackup', null);
     await db.setMeta('tiProblem', check.problems.slice(0, 6));
     if (!silent) notify();
@@ -7193,6 +7226,8 @@ const parsePortfolio = SH.parsePortfolio;
 const parseNumber = SH.parseNumber;
 const pct = SH.pct;
 const parseReport = SH.parseReport;
+const parseIncome = SH.parseIncome;
+const readPdf = SH.readPdf;
 const parseTrades = SH.parseTrades;
 const portfolioGaps = SH.portfolioGaps;
 const portfolioVolatility = SH.portfolioVolatility;
@@ -7220,6 +7255,7 @@ const setMeta = SH.setMeta;
 const setSetting = SH.setSetting;
 const storageInfo = SH.storageInfo;
 const storageState = SH.storageState;
+const openedLocally = SH.openedLocally;
 const stressTest = SH.stressTest;
 const subscribe = SH.subscribe;
 const syncTinvest = SH.syncTinvest;
@@ -7292,6 +7328,14 @@ function renderWelcome() {
         <span style="opacity:.6">сборка ${BUILD}</span></p>
 
       <div id="wStale"></div>
+      ${openedLocally() ? `<div class="card" style="border-left:3px solid var(--warn);margin-bottom:18px;line-height:1.65">
+        <b>Открыт файл с устройства</b><br>
+        <span class="muted">У каждого браузера для такого файла своя отдельная база. Если ты вводил
+        токен в другом браузере — здесь его нет, и портфель не пропал: он остался там. Обновления
+        приложения сюда тоже не приходят, а брокер может не пропускать запросы со страницы без
+        собственного адреса.<br><br>
+        Рабочее место приложения — его ссылка. Файлом пользуйся, только когда ссылка недоступна.</span>
+      </div>` : ''}
       <label>Токен Т-Инвестиций</label>
       <input type="password" id="wToken" placeholder="t.xxxxxxxx" autocomplete="off">
       <button class="btn wide" id="wConnect">Продолжить</button>
@@ -8486,11 +8530,21 @@ async function openDiagnostics() {
     ${line('сборка приложения', esc(BUILD))}
     ${line('журнал собран сборкой', esc(syncedBuild || '—'))}
     ${line('хранение данных', esc(storageName[storage.mode] || storage.mode))}
-    ${line('открыто как', esc(location.protocol === 'file:' ? 'файл с устройства' : 'страница по ссылке'))}
+    ${line('открыто как', esc(openedLocally()
+      ? `локальный файл (${String(location.protocol || '').replace(':', '')})`
+      : 'страница по ссылке'))}
     ${line('токен', token ? 'сохранён' : 'нет')}
     ${line('счёт', esc(account || '—'))}
     ${line('последняя загрузка', esc(when(st.settings.tiSyncedAt)))}
     ${line('операций в журнале', st.ops.length)}
+    ${line('из них резерв', (() => {
+      // Подушка не приходит от брокера и живёт только здесь. Если её
+      // записи исчезли, это видно сразу, а не через неделю на главной.
+      const r = (st.ops || []).filter(o => o.type === 'reserve');
+      return r.length
+        ? `${r.length} на ${Math.round(r.reduce((a, o) => a + (Number(o.amount) || 0), 0)).toLocaleString('ru-RU')} \u20bd`
+        : '<span style="color:var(--warn)">записей нет</span>';
+    })())}
     ${line('бумаг в портфеле', mine.length)}
 
     ${problem ? `<div class="act attention" style="margin-top:14px">
