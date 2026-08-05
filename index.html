@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-04b</title>
+<title>Штурвал · 2026-08-04c</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-04b';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-04c';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -287,6 +287,30 @@ const pct = v => {
  * Сравнивать такие с бумагами постоянного купона по одному числу нельзя.
  */
 /**
+ * ДОПУЩЕНИЯ — В ОДНОМ МЕСТЕ, С ОДНОЙ ПРОВЕРКОЙ.
+ *
+ * Это не измеренные величины, а предположения, и приложение честно
+ * называет их допущениями на экране. Беда была в другом: значения по
+ * умолчанию лежали россыпью по коду, причём с разными условиями. Инфляция
+ * бралась как `settings.inflation || 0.08` в одном месте и как
+ * `meta.inflation > 0 ? ... : 0.08` в другом — при отрицательном вводе
+ * первое приняло бы минус, второе нет. Одно допущение — одна проверка.
+ */
+const ASSUMED = {
+  inflation: 0.08,     // сколько дорожает жизнь за год; правится в настройках
+  moneyRate: 0.16,     // ставка по деньгам, когда биржа не ответила
+  marketYield: 0.08,   // средняя дивдоходность рынка, пока не посчитана
+  crashDrop: -0.30     // сценарий обвала для проверки на прочность
+};
+/** Разумная доля из настроек или допущение. Ноль и минус — не настройка. */
+function share(value, fallback) {
+  const r = Number(value);
+  return r > 0 && r < 1 ? r : fallback;
+}
+const inflationRate = settings => share(settings && settings.inflation, ASSUMED.inflation);
+const moneyRate = value => share(value, ASSUMED.moneyRate);
+
+/**
  * ВОЗРАСТ ПОСЛЕДНЕЙ ВЫПЛАТЫ — ОДНА ШКАЛА НА ВСЁ ПРИЛОЖЕНИЕ.
  *
  * Порогов было три, и они жили порознь: замены отбрасывали кандидата
@@ -350,7 +374,7 @@ function sectorOf(asset) {
   return null;
 }
 
-return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, PAYOUT_AGE, parseNumber, pct, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
+return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, PAYOUT_AGE, ASSUMED, share, inflationRate, moneyRate, parseNumber, pct, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
 })());
 
 /* ─── core/operations.js ─── */
@@ -907,7 +931,7 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
     } else {
       out.push({
         kind: 'over', cls: high.cls, urgency: 'info',
-        title: `${label[high.cls][0].toUpperCase() + label[high.cls].slice(1)}: ${(high.actual * 100).toFixed(0)}% вместо ${Math.round(high.target * 100)}%`,
+        title: `${label[high.cls][0].toUpperCase() + label[high.cls].slice(1)}: ${pct(high.actual)} вместо ${pct(high.target)}`,
         detail: `Перевес на ${Math.round(high.off * 100)} п.п. Продавать не нужно — доля выровняется сама, `
           + `когда новые взносы пойдут в другие классы.`,
         note: `Перевес возникает и просто от того, что бумага дорожает: это не ошибка, а следствие роста.`
@@ -2568,7 +2592,7 @@ const VOLATILITY = { stocks: 0.30, bonds: 0.08, hedge: 0.18 };
  * нельзя. Облигации — исключение: их доходность к погашению известна, и
  * подставлять вместо неё константу значит считать хуже, чем можешь.
  */
-const ASSUMED = { stocks: 0.13, bonds: 0.12, hedge: 0.06 };
+const ASSUMED_RETURN = { stocks: 0.13, bonds: 0.12, hedge: 0.06 };
 
 /**
  * Ставки для прогноза по конкретному портфелю: доходность облигаций берётся
@@ -2594,14 +2618,14 @@ function ratesFor(bondYtm, stockYield = 0) {
   // вообще растут. Одной границы достаточно: вторая, на сами выплаты,
   // оказалась лишней — потолок и так её перекрывал.
   const FLOOR = 0.08, CEILING = 0.16;
-  const raw = stocksOk ? stockYield + ASSUMED_GROWTH : ASSUMED.stocks;
-  const stocks = stocksOk ? Math.min(CEILING, Math.max(FLOOR, raw)) : ASSUMED.stocks;
+  const raw = stocksOk ? stockYield + ASSUMED_GROWTH : ASSUMED_RETURN.stocks;
+  const stocks = stocksOk ? Math.min(CEILING, Math.max(FLOOR, raw)) : ASSUMED_RETURN.stocks;
   const capped = stocksOk && raw > CEILING;
 
   const parts = [];
   parts.push(bondsOk
     ? `облигации ${pct(bondYtm)} — фактическая доходность твоих бумаг к погашению`
-    : `облигации ${(ASSUMED.bonds * 100).toFixed(0)}% — допущение, пока биржа не отдала доходность твоих выпусков`);
+    : `облигации ${(ASSUMED_RETURN.bonds * 100).toFixed(0)}% — допущение, пока биржа не отдала доходность твоих выпусков`);
   parts.push(stocksOk
     ? (capped
         ? `акции ${pct(stocks)} — твои выплаты ${pct(stockYield)} плюс `
@@ -2609,18 +2633,18 @@ function ratesFor(bondYtm, stockYield = 0) {
           + `ограничен ${(CEILING * 100).toFixed(0)}%: такие выплаты редко держатся годами, а обещать их — обманывать`
         : `акции ${pct(stocks)} — это твои фактические выплаты ${pct(stockYield)} `
           + `плюс ${(ASSUMED_GROWTH * 100).toFixed(0)}% на рост цены; рост — допущение, его никто не знает`)
-    : `акции ${(ASSUMED.stocks * 100).toFixed(0)}% — допущение`);
-  parts.push(`защита ${(ASSUMED.hedge * 100).toFixed(0)}% — допущение`);
+    : `акции ${(ASSUMED_RETURN.stocks * 100).toFixed(0)}% — допущение`);
+  parts.push(`защита ${(ASSUMED_RETURN.hedge * 100).toFixed(0)}% — допущение`);
 
   return {
-    rates: { ...ASSUMED, bonds: bondsOk ? bondYtm : ASSUMED.bonds, stocks },
+    rates: { ...ASSUMED_RETURN, bonds: bondsOk ? bondYtm : ASSUMED_RETURN.bonds, stocks },
     measured: [...(bondsOk ? ['bonds'] : []), ...(stocksOk ? ['stocks'] : [])],
     note: `Считано так: ${parts.join('; ')}.`
   };
 }
 
 /** Ожидаемая доходность портфеля из его состава. */
-function expectedReturn(byClass, securities, rates = ASSUMED) {
+function expectedReturn(byClass, securities, rates = ASSUMED_RETURN) {
   if (!(securities > 0)) return rates.stocks;
   let sum = 0;
   for (const [cls, value] of Object.entries(byClass)) {
@@ -2772,7 +2796,7 @@ function outcomeRange(start, monthly, years, expected, volatility, yearlyBonus =
  */
 function yearOutlook(byClass, securities, monthly = 0, rates, positions = null) {
   if (!(securities > 0)) return null;
-  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED_RETURN);
   const vol = portfolioVolatility(byClass, securities, positions);
   const range = outcomeRange(securities, monthly, 1, expected, vol);
   const base = securities + monthly * 12;
@@ -2864,7 +2888,7 @@ function concentrationCost({ byClass, securities, positions, monthly = 0, rates,
   const volNow = portfolioVolatility(byClass, securities, positions);
   const volTrim = portfolioVolatility(byClass, securities,
     [...trimmed, ...positions.filter(p => allocationClass(p) !== 'stocks')]);
-  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED_RETURN);
 
   // Считаем аналитически, а не прогонкой случайных сценариев: разница между
   // портфелями здесь меньше собственного шума симуляции, и от прогона к
@@ -2964,7 +2988,7 @@ function analyzeGoal({ current, monthly, goal, years, byClass, securities, taxRe
     return { hasGoal: false, message: 'Цель не задана — укажи сумму, и я посчитаю план.' };
   }
 
-  const expected = expectedReturn(byClass, securities, rates || ASSUMED);
+  const expected = expectedReturn(byClass, securities, rates || ASSUMED_RETURN);
   const volatility = portfolioVolatility(byClass, securities, positions);
 
   const reachIn = yearsToGoal(current, monthly, goal, expected, taxRefund);
@@ -3013,7 +3037,7 @@ function buildLevers({ current, monthly, goal, years, expected, taxRefund, reach
   return out;
 }
 
-return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle, ratesFor, stockVolatility, concentrationCost, inTodaysMoney, realReturn, rateSensitivity, ASSUMED_RATES: ASSUMED};
+return {expectedReturn, portfolioVolatility, futureValue, requiredMonthly, yearsToGoal, outcomeRange, chanceOfGoal, analyzeGoal, yearOutlook, goalProgress, whatMovesTheNeedle, ratesFor, stockVolatility, concentrationCost, inTodaysMoney, realReturn, rateSensitivity, ASSUMED_RATES: ASSUMED_RETURN};
 })());
 
 /* ─── data/db.js ─── */
@@ -3741,7 +3765,29 @@ function tableRows(block) {
  * P/E и прибыли ISS не отдаёт — ни здесь, ни где-либо ещё: см. screener.js,
  * где об этом сказано прямо, вместо того чтобы подсунуть выдуманное число.
  */
-async function fetchAllStocks() {
+/**
+ * КОРОТКАЯ ПАМЯТЬ О ДОСКЕ БИРЖИ.
+ *
+ * Список акций нужен сразу двум разделам: «что подходит портфелю» и «что
+ * можно поменять». Каждый качал его сам, и на медленной сети выходило
+ * нелепое: идеи по рынку загрузились, а замены на том же экране написали
+ * «биржа не ответила за 60 секунд — не дождался: список акций». Один и тот
+ * же вопрос, заданный дважды с разницей в секунды, получал разные ответы.
+ *
+ * Держим ответ пару минут. Дольше нельзя: цены на экране должны быть
+ * сегодняшними, а не позавчерашними.
+ */
+const BOARD_TTL = 120000;
+const boardCache = new Map();
+async function cachedBoard(key, load) {
+  const hit = boardCache.get(key);
+  if (hit && Date.now() - hit.at < BOARD_TTL) return hit.rows;
+  const rows = await load();
+  boardCache.set(key, { at: Date.now(), rows });
+  return rows;
+}
+
+async function fetchAllStocksRaw() {
   // Биржа отдаёт всю доску одним ответом за доли секунды — просим целиком,
   // чтобы видеть рынок, а не его верхушку. SECTYPE отделяет настоящие акции
   // (обычные и привилегированные) от фондов и расписок, которые торгуются
@@ -3780,7 +3826,7 @@ async function fetchAllStocks() {
  * Облигации: ОФЗ (TQOB) и корпоративные (TQCB). Доходность к погашению
  * и срок биржа отдаёт сама — здесь ничего считать на глазок не нужно.
  */
-async function fetchAllBonds(kinds = ['gov'], maxPages = 3) {
+async function fetchAllBondsRaw(kinds = ['gov'], maxPages = 3) {
   // По умолчанию только ОФЗ: их шесть десятков, ответ приходит мгновенно.
   // Доска корпоративных — тысячи выпусков и мегабайты, из-за неё поиск
   // не доживал до конца. Корпоративные просим отдельно и тоже страницами.
@@ -3876,7 +3922,7 @@ const FUND_KINDS = [
   [/акци|индекс|широк|equity/i, 'stocks', 'акции']
 ];
 
-async function fetchAllFunds() {
+async function fetchAllFundsRaw() {
   const j = await fetchJSON(`${ISS}/engines/stock/markets/shares/boards/TQTF/securities.json`
     + `?iss.meta=off&iss.only=securities,marketdata`
     + `&securities.columns=SECID,SHORTNAME,SECNAME,PREVPRICE,LOTSIZE`
@@ -3902,13 +3948,41 @@ async function fetchAllFunds() {
 }
 
 /** История дивидендов бумаги: суммы и даты закрытия реестра. */
-async function fetchDividendHistory(ticker) {
+async function fetchDividendHistoryRaw(ticker) {
   const j = await fetchJSON(`${ISS}/securities/${encodeURIComponent(ticker)}/dividends.json?iss.meta=off`, 8000);
   return tableRows(j?.dividends)
     .filter(r => r.value > 0 && r.registryclosedate)
     .map(r => ({ date: r.registryclosedate, value: r.value, currency: r.currencyid || 'RUB' }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
+
+/**
+ * История выплат живёт дольше доски: дивиденды объявляют раз в квартал,
+ * а не раз в секунду. Запросов же тут больше всего — по одному на каждую
+ * бумагу рынка, и половина из них повторяется между разделами «что купить»
+ * и «что поменять». Держим полчаса.
+ */
+const DIVIDENDS_TTL = 30 * 60000;
+const dividendCache = new Map();
+function fetchDividendHistory(ticker) {
+  const key = String(ticker || '').toUpperCase();
+  const hit = dividendCache.get(key);
+  if (hit && Date.now() - hit.at < DIVIDENDS_TTL) return Promise.resolve(hit.rows);
+  // Кладём в память само обещание: если два раздела спросят одну бумагу
+  // одновременно, запрос уйдёт один раз, а не два.
+  const p = fetchDividendHistoryRaw(key).then(rows => {
+    dividendCache.set(key, { at: Date.now(), rows });
+    return rows;
+  }, err => { dividendCache.delete(key); throw err; });
+  dividendCache.set(key, { at: Date.now(), rows: p });
+  return p;
+}
+
+/** Те же три запроса, но с короткой памятью — см. cachedBoard. */
+const fetchAllStocks = () => cachedBoard('stocks', fetchAllStocksRaw);
+const fetchAllFunds = () => cachedBoard('funds', fetchAllFundsRaw);
+const fetchAllBonds = (kinds = ['gov'], maxPages = 3) =>
+  cachedBoard(`bonds:${[...kinds].sort().join(',')}:${maxPages}`, () => fetchAllBondsRaw(kinds, maxPages));
 
 return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
         fetchKeyRate, fetchAllStocks, fetchAllBonds, fetchAllFunds, fetchDividendHistory};
@@ -4094,7 +4168,7 @@ function fitScore(row, ctx = {}) {
   }
 
   if (row.kind === 'bond') {
-    const rate = ctx.moneyRate || 0.16;
+    const rate = moneyRate(ctx.moneyRate);
     const over = (row.ytm || 0) - rate;
     const yPts = Math.max(0, Math.min(45, Math.round(45 * (over + 0.02) / 0.06)));
     score += yPts;
@@ -4122,7 +4196,7 @@ function fitScore(row, ctx = {}) {
       why.push(`оферта через ${row.yearsToOffer} ${row.yearsToOffer < 2 ? 'года' : 'лет'} — доходность к погашению может не сбыться`);
     }
   } else {
-    const avg = ctx.marketYield || 0.08;
+    const avg = share(ctx.marketYield, ASSUMED.marketYield);
     const yPts = Math.max(0, Math.min(40, Math.round(40 * (row.yieldPct || 0) / (avg * 1.8))));
     score += yPts;
     if ((row.yieldPct || 0) > avg) why.push(`выплаты ${pct(row.yieldPct)} — выше средних по рынку`);
@@ -4176,7 +4250,28 @@ function fitScore(row, ctx = {}) {
   if (gap > 0.05) { score += 15; why.push('этого класса не хватает до плана'); }
   else if (gap < -0.05) { score -= 10; why.push('класс и так с перевесом'); }
 
-  if (owned.has(row.ticker)) { score -= 20; why.push('уже есть в портфеле — докупка усилит концентрацию'); }
+  // УЖЕ КУПЛЕННАЯ БУМАГА. Штраф был один на всех — минус двадцать любой
+  // своей бумаге с формулировкой «докупка усилит концентрацию». Но у МТС
+  // доля восемь процентов при пределе двадцать пять: докупка её не усилит,
+  // а вердикт на соседнем экране прямо советовал направить в неё взнос.
+  // Два экрана спорили об одном действии.
+  //
+  // Теперь штраф следует за долей. Малая доля — знакомая бумага без нового
+  // риска, и это скорее плюс, чем минус; большая — настоящий перекос.
+  if (owned.has(row.ticker)) {
+    const held = (ctx.positionShares && ctx.positionShares[row.ticker]) || 0;
+    const limit = ctx.singleMax || 0.25;
+    if (held >= limit) {
+      score -= 25;
+      why.push(`уже ${pct(held)} портфеля при пределе ${pct(limit)} — докупка усилит перекос`);
+    } else if (held >= limit * 0.7) {
+      score -= 12;
+      why.push(`уже ${pct(held)} портфеля — близко к пределу на одну бумагу`);
+    } else {
+      score -= 3;
+      why.push('уже есть в портфеле — знакомая бумага, новый риск не добавляет');
+    }
+  }
 
   return { score: Math.max(0, Math.min(100, Math.round(score))), why };
 }
@@ -6353,7 +6448,7 @@ async function getState() {
     // с датой — устаревшая ставка хуже отсутствующей, о ней надо напомнить.
     keyRate: meta.keyRate && meta.keyRate.rate > 0 ? meta.keyRate : null,
     // Инфляция — допущение для пересчёта цели в сегодняшние деньги.
-    inflation: meta.inflation > 0 ? meta.inflation : 0.08,
+    inflation: inflationRate(meta),
     // Измеренная доходность своих облигаций к погашению. Прогноз подставит
     // её вместо допущения; протухшую (старше месяца) не берём.
     bondYtm: (meta.bondYtm && meta.bondYtm.value > 0
@@ -6867,8 +6962,20 @@ async function findIdeas(kind, filters = {}, opts = {}) {
       return out;
     })(),
     sectorMax: (SH.LIMITS && SH.LIMITS.sectorMax) || 0.35,
-    moneyRate: market && market.moneyRate > 0 ? market.moneyRate / 100 : 0.16,
-    marketYield: 0.08
+    singleMax: (SH.LIMITS && SH.LIMITS.singlePosition) || 0.25,
+    // Доли отдельных бумаг: штраф за докупку своей зависит от того,
+    // сколько её уже есть, а не от самого факта владения.
+    positionShares: (() => {
+      const total = Number(st.summary?.securities) || 0;
+      if (!(total > 0)) return {};
+      const out = {};
+      for (const p of st.positions.filter(x => x.qty > 0)) {
+        out[p.ticker] = (p.qty * p.price) / total;
+      }
+      return out;
+    })(),
+    moneyRate: moneyRate(market && market.moneyRate / 100),
+    marketYield: ASSUMED.marketYield
   };
 
   if (kind === 'hedge') {
@@ -7313,6 +7420,10 @@ const parseCashOps = SH.parseCashOps;
 const parsePortfolio = SH.parsePortfolio;
 const parseNumber = SH.parseNumber;
 const pct = SH.pct;
+const ASSUMED = SH.ASSUMED;
+const share = SH.share;
+const inflationRate = SH.inflationRate;
+const moneyRate = SH.moneyRate;
 const netOfTax = SH.netOfTax;
 const PAYOUT_AGE = SH.PAYOUT_AGE;
 const ndflRate = SH.ndflRate;
@@ -8972,7 +9083,15 @@ async function openPlan() {
       ${plan.length
         ? 'Всё ниже посчитано из твоих долей, выплат и ставки. Приложение не знает, что вырастет, — поэтому советует только то, что можно проверить.'
         : 'Доли по классам в норме, перекосов нет. Продолжай регулярные пополнения — это и есть план.'}
-      ${!flow.rows.length ? '<br><br><b style="color:var(--warn)">Биржа не ответила</b> — советы посчитаны только по долям, без купонов и дивидендов. Обычно так бывает, когда файл открыт прямо с устройства.' : ''}
+      ${!flow.rows.length ? `<br><br><b style="color:var(--warn)">Биржа не ответила</b> — советы посчитаны только по долям, без купонов и дивидендов. `
+        + (openedLocally()
+          // Файл с устройства — тогда причина почти всегда в этом.
+          ? 'Обычно так бывает, когда файл открыт прямо с устройства.'
+          // Открыто по ссылке — прежняя подсказка была прямой неправдой:
+          // человек читал «файл открыт с устройства», глядя на адресную
+          // строку с сайтом. Виновата задержка биржи, а не способ запуска.
+          : 'Страница открыта по ссылке, так что дело не в способе запуска: биржа не ответила вовремя. '
+            + 'Обнови ещё раз или загляни в «Ещё» → «Диагностика» → «Проверить доступ к бирже».') : ''}
       ${(() => {
         const at = st.settings.tiSyncedAt || st.settings.lastPriceUpdate;
         if (!at) return '';
@@ -9099,7 +9218,7 @@ async function openPlan() {
   // если возможностью не пользуются, виноват интерфейс, а не человек.
   const marketRate = async () => {
     const m = await withLimit(store.marketContext(), 4, {}) || {};
-    return m.moneyRate > 0 ? m.moneyRate / 100 : 0.16;
+    return moneyRate(m.moneyRate / 100);
   };
 
   // Какой класс искать: тот, которого не хватает сильнее. Защиту скринер
@@ -9239,7 +9358,7 @@ async function openKeyRate() {
     <input type="date" id="fKeyRateDate" value="${k ? k.date : new Date().toISOString().slice(0, 10)}">
 
     <label>Инфляция, % в год (допущение)</label>
-    <input type="number" id="fInflation" inputmode="decimal" step="0.5" value="${((st.settings.inflation || 0.08) * 100).toFixed(1)}">
+    <input type="number" id="fInflation" inputmode="decimal" step="0.5" value="${(inflationRate(st.settings) * 100).toFixed(1)}">
     <p class="muted" style="margin:6px 0 0;line-height:1.6">Нужна, чтобы пересчитать цель в сегодняшние деньги.
       Будущую инфляцию не знает никто — это допущение, и приложение всегда называет его допущением.</p>
 
@@ -9359,8 +9478,12 @@ function openWhatsNew() {
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Что нового · сборка ${BUILD}</h2>
     <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля и 3 августа. Отметка сборки внизу главной
       обязана совпадать с именем скачанного файла — иначе открылся старый.</p>
+    ${item('Биржу больше не спрашивают об одном дважды', 'Список акций нужен и разделу «что подходит портфелю», и «что можно поменять» — каждый качал его сам. На медленной сети выходило нелепое: идеи загрузились, а замены рядом написали «не дождался: список акций». Теперь ответ биржи живёт две минуты и достаётся обоим. То же с историями выплат — их запрашивается по одной на каждую бумагу рынка, и половина повторялась: теперь они живут полчаса, а одновременные вопросы об одной бумаге склеиваются в один запрос.')}
+    ${item('«Биржа не ответила» больше не выдумывает причину', 'Раньше в этом случае писалось «обычно так бывает, когда файл открыт прямо с устройства» — даже когда приложение открыто по ссылке и это видно в адресной строке. Теперь причина зависит от того, как приложение запущено, а при открытии по ссылке предлагается проверка доступа к бирже.')}
     ${item('Проценты пишутся по-русски', 'Рядом стояли «32,7% из 25%» и «14.9% выплат за год»: доли печатались через запятую, а доходности через точку. Переведены все 57 мест — теперь число одной величины выглядит одинаково на любом экране.')}
+    ${item('Штраф за свою бумагу следует за её долей', 'Любая уже купленная бумага получала минус двадцать баллов со словами «докупка усилит концентрацию» — независимо от того, восемь у неё процентов портфеля или тридцать. При этом вердикт на соседнем экране прямо советовал направить взнос в МТС с долей 8%. Теперь штраф растёт вместе с долей, а про малую долю честно сказано: знакомая бумага, нового риска не добавляет.')}
     ${item('Про замолчавшую бумагу оба экрана говорят одно', 'Порогов свежести выплат было три, и они жили порознь: из замен бумага исчезала после 400 дней без выплат, а пометка «устарело» ставилась только после 540. Не плати́вшая полтора года бумага пропадала из замен — и висела в списке «что подходит портфелю» с полной доходностью и без оговорок. Теперь шкала одна, и в списке прямо написано, сколько месяцев выплат не было.')}
+    ${item('Допущения читаются одной проверкой', 'Инфляция, ставка по деньгам и средняя доходность рынка — это предположения, и приложение так их и называет. Но значения по умолчанию лежали россыпью по коду с разными условиями: в одном месте отрицательная инфляция из настроек была бы принята, в другом отброшена. Теперь допущение одно, проверка одна.')}
     ${item('Ставка налога одна на все расчёты', 'Она была зашита числом в шести местах и одновременно читалась из настроек в четырёх других. Пока значения совпадали, это было незаметно; поменяешь ставку в «Ещё» — и половина экранов считала бы по-старому. Теперь ставка одна, и её меняешь ты.')}
     ${item('Отрасль узнаётся по тикеру, а не только по имени', 'Биржа зовёт бумаги «Татнфт 3ао» и «Сургнфгз-п» — образцы под такие сокращения не подходили, отрасли у них не находилось, и правило «не больше двух бумаг одной отрасли» их не считало. В пятёрке лидеров выходило четыре нефтегаза при работающем на вид ограничении.')}
     ${item('Тип купона ОФЗ читается из номера серии', 'Признак «биржа не назвала ближайший купон» ненадёжен: у ОФЗ 29008 он объявлен, и флоатер проходил как обычная бумага. Теперь тип берётся из номера: 29 и 24 — переменный купон, 52 — индексируемый номинал, 26 и 25 — постоянный. Менять постоянный купон на любой из первых двух приложение не предлагает.')}
