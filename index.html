@@ -2159,6 +2159,9 @@ function verdict(state, opts = {}) {
 
   const steps = [];
   const money = v => Math.round(v).toLocaleString('ru-RU') + ' \u20bd';
+  // Свободный остаток на счёте: он уже здесь и уже ничего не приносит.
+  const idleCash = Math.max(0, Number(state.summary?.cash) || 0);
+
   // Сколько из взноса реально дойдёт до бумаг после деления с резервом.
   // Без этого числа шаг 1 говорил «15 000 ₽ в рынок», а шаг 2 тут же
   // раскладывал по бумагам все 30 000 ₽ — два соседних пункта одного
@@ -2194,6 +2197,15 @@ function verdict(state, opts = {}) {
       what: `Ближайший взнос ${money(opts.contribution.amount)}: ${parts.join(', ')}`,
       why: `Деление — по степени недобора до целевых долей, а не по вкусу: класс, отстающий сильнее, `
         + `получает больше. Так доли выравниваются сами, без продаж и без комиссий.`
+        // ДЕНЬГИ, КОТОРЫЕ УЖЕ ЛЕЖАТ. Приложение поминало свободный остаток
+        // только когда его подозрительно много — от 20 000 ₽ и четверти
+        // счёта, как признак незаписанной сделки. А полторы-две тысячи,
+        // оставшиеся от прошлой покупки или пришедшие дивидендами, просто
+        // лежали без работы, и план предлагал купить ровно на взнос.
+        + (idleCash >= 500
+          ? ` На счёте уже лежит ${money(idleCash)} свободными — эти деньги не работают. `
+            + `Впиши ${money(monthly + idleCash)} в поле «Ближайший взнос», чтобы вложить их вместе с ним.`
+          : '')
         + (split
           ? ` Внимание: здесь разложена вся сумма взноса. Если делишь его с резервом (шаг 1), `
             + `в бумаги идёт ${money(toMarket)} — впиши эту сумму в поле «Ближайший взнос» и пересчитай.`
@@ -3724,7 +3736,25 @@ async function fetchKeyRate(timeoutMs = 8000) {
  * всего его режет VPN. Лучше сказать это за пять секунд, чем заставлять
  * ждать минуту и выдавать туманное «не ответила».
  */
-async function pingExchange(timeout = 5000) {
+/**
+ * Проверка доступности — тоже запрос, и он уходил перед каждым разбором:
+ * дважды за одно открытие «Что стоит сделать». Ответ на вопрос «биржа
+ * жива?» не меняется каждые пять секунд, поэтому держим его полминуты.
+ * Отрицательный ответ не запоминаем: если связь появилась, ждать не надо.
+ */
+const PING_TTL = 30000;
+let pingMemo = null;
+function pingExchange(timeout = 5000) {
+  if (pingMemo && Date.now() - pingMemo.at < PING_TTL) return pingMemo.value;
+  const value = pingExchangeRaw(timeout).then(ok => {
+    if (!ok) pingMemo = null;
+    return ok;
+  }, err => { pingMemo = null; throw err; });
+  pingMemo = { at: Date.now(), value };
+  return value;
+}
+
+async function pingExchangeRaw(timeout = 5000) {
   try {
     const j = await fetchJSON(`${ISS}/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json`
       + `?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID`, timeout);
@@ -3779,12 +3809,19 @@ function tableRows(block) {
  */
 const BOARD_TTL = 120000;
 const boardCache = new Map();
-async function cachedBoard(key, load) {
+function cachedBoard(key, load) {
   const hit = boardCache.get(key);
-  if (hit && Date.now() - hit.at < BOARD_TTL) return hit.rows;
-  const rows = await load();
-  boardCache.set(key, { at: Date.now(), rows });
-  return rows;
+  if (hit && Date.now() - hit.at < BOARD_TTL) return Promise.resolve(hit.rows);
+  // В память кладётся само ожидание, а не готовый ответ. Иначе разделы,
+  // стартующие одновременно, оба видят пустой кэш и оба идут на биржу —
+  // ровно та беда, ради которой кэш и заводился: «биржа не ответила за
+  // 60 секунд» при бирже, отвечающей за 0,2 с.
+  const p = load().then(rows => {
+    boardCache.set(key, { at: Date.now(), rows });
+    return rows;
+  }, err => { boardCache.delete(key); throw err; });
+  boardCache.set(key, { at: Date.now(), rows: p });
+  return p;
 }
 
 async function fetchAllStocksRaw() {
@@ -3978,13 +4015,20 @@ function fetchDividendHistory(ticker) {
   return p;
 }
 
+/** Забыть всё, что помним о бирже: нужно проверкам и после смены счёта. */
+function clearMarketMemory() {
+  boardCache.clear();
+  dividendCache.clear();
+  pingMemo = null;
+}
+
 /** Те же три запроса, но с короткой памятью — см. cachedBoard. */
 const fetchAllStocks = () => cachedBoard('stocks', fetchAllStocksRaw);
 const fetchAllFunds = () => cachedBoard('funds', fetchAllFundsRaw);
 const fetchAllBonds = (kinds = ['gov'], maxPages = 3) =>
   cachedBoard(`bonds:${[...kinds].sort().join(',')}:${maxPages}`, () => fetchAllBondsRaw(kinds, maxPages));
 
-return {FAIL, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
+return {FAIL, clearMarketMemory, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
         fetchKeyRate, fetchAllStocks, fetchAllBonds, fetchAllFunds, fetchDividendHistory};
 })());
 
@@ -6003,23 +6047,14 @@ const col = (data, name) => {
  */
 async function dividendHistory(ticker, currentPrice) {
   try {
-    const j = await fetchJSON(`${ISS}/securities/${encodeURIComponent(ticker)}/dividends.json?iss.meta=off`);
-    const d = j?.dividends;
-    if (!d?.data?.length) return { payments: [], ttm: 0, yieldTtm: null, known: false };
+    // Историю выплат качали ДВЕ разные функции: эта и та, что в слое биржи.
+    // Один и тот же запрос уходил дважды, и короткая память покрывала
+    // только один путь. Берём строки оттуда — разбор остаётся свой,
+    // а запрос становится общим.
+    const rows = await moex.fetchDividendHistory(ticker);
+    if (!rows.length) return { payments: [], ttm: 0, yieldTtm: null, known: false };
 
-    const getDate = col(d, 'registryclosedate');
-    const getValue = col(d, 'value');
-    const getCur = col(d, 'currencyid');
-    const getSec = col(d, 'secid');
-
-    // Биржа отвечает по конкретной бумаге, но проверяем принадлежность:
-    // чужие выплаты в сводке — хуже, чем отсутствие данных.
-    const want = String(ticker).toUpperCase();
-    const payments = d.data
-      .filter(r => { const s = getSec(r); return !s || String(s).toUpperCase() === want; })
-      .map(r => ({ date: getDate(r), value: Number(getValue(r)) || 0, currency: getCur(r) || 'RUB' }))
-      .filter(p => p.date && p.value > 0 && p.currency === 'RUB')
-      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    const payments = rows.filter(p => p.currency === 'RUB' || p.currency === 'SUR');
 
     const yearAgo = new Date(); yearAgo.setFullYear(yearAgo.getFullYear() - 1);
     const cutoff = yearAgo.toISOString().slice(0, 10);
@@ -9478,9 +9513,10 @@ function openWhatsNew() {
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Что нового · сборка ${BUILD}</h2>
     <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля и 3 августа. Отметка сборки внизу главной
       обязана совпадать с именем скачанного файла — иначе открылся старый.</p>
-    ${item('Биржу больше не спрашивают об одном дважды', 'Список акций нужен и разделу «что подходит портфелю», и «что можно поменять» — каждый качал его сам. На медленной сети выходило нелепое: идеи загрузились, а замены рядом написали «не дождался: список акций». Теперь ответ биржи живёт две минуты и достаётся обоим. То же с историями выплат — их запрашивается по одной на каждую бумагу рынка, и половина повторялась: теперь они живут полчаса, а одновременные вопросы об одной бумаге склеиваются в один запрос.')}
+    ${item('Биржу больше не спрашивают об одном дважды', 'Список акций нужен и разделу «что подходит портфелю», и «что можно поменять» — каждый качал его сам. На медленной сети выходило нелепое: идеи загрузились, а замены рядом написали «не дождался: список акций». Теперь ответ биржи живёт две минуты и достаётся обоим. То же с историями выплат — их запрашивается по одной на каждую бумагу рынка, и половина повторялась: теперь они живут полчаса, а одновременные вопросы об одной бумаге склеиваются в один запрос. Историю выплат качали две разные функции — теперь обе ходят одним путём. Проверка доступности биржи тоже помнит ответ полминуты: раньше она уходила в сеть перед каждым разбором.')}
     ${item('«Биржа не ответила» больше не выдумывает причину', 'Раньше в этом случае писалось «обычно так бывает, когда файл открыт прямо с устройства» — даже когда приложение открыто по ссылке и это видно в адресной строке. Теперь причина зависит от того, как приложение запущено, а при открытии по ссылке предлагается проверка доступа к бирже.')}
     ${item('Проценты пишутся по-русски', 'Рядом стояли «32,7% из 25%» и «14.9% выплат за год»: доли печатались через запятую, а доходности через точку. Переведены все 57 мест — теперь число одной величины выглядит одинаково на любом экране.')}
+    ${item('Деньги, лежащие на счёте, больше не забыты', 'Свободный остаток поминался, только когда его подозрительно много — от 20 000 ₽ и четверти счёта, как признак незаписанной сделки. А полторы тысячи, оставшиеся от прошлой покупки или пришедшие дивидендами, просто лежали без работы. Теперь план ближайшего взноса называет их и предлагает вложить вместе со взносом. Мелочь вроде двадцати рублей не поминается — это шум.')}
     ${item('Штраф за свою бумагу следует за её долей', 'Любая уже купленная бумага получала минус двадцать баллов со словами «докупка усилит концентрацию» — независимо от того, восемь у неё процентов портфеля или тридцать. При этом вердикт на соседнем экране прямо советовал направить взнос в МТС с долей 8%. Теперь штраф растёт вместе с долей, а про малую долю честно сказано: знакомая бумага, нового риска не добавляет.')}
     ${item('Про замолчавшую бумагу оба экрана говорят одно', 'Порогов свежести выплат было три, и они жили порознь: из замен бумага исчезала после 400 дней без выплат, а пометка «устарело» ставилась только после 540. Не плати́вшая полтора года бумага пропадала из замен — и висела в списке «что подходит портфелю» с полной доходностью и без оговорок. Теперь шкала одна, и в списке прямо написано, сколько месяцев выплат не было.')}
     ${item('Допущения читаются одной проверкой', 'Инфляция, ставка по деньгам и средняя доходность рынка — это предположения, и приложение так их и называет. Но значения по умолчанию лежали россыпью по коду с разными условиями: в одном месте отрицательная инфляция из настроек была бы принята, в другом отброшена. Теперь допущение одно, проверка одна.')}
