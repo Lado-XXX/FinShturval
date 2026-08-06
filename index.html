@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-04c</title>
+<title>Штурвал · 2026-08-06b</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-04c';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-06b';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -6943,8 +6943,15 @@ async function mapLimit(items, limit, fn) {
  */
 // На каком шаге сейчас поиск. Нужно, чтобы при отказе по времени сказать
 // не просто «биржа не ответила», а что именно не дождались.
-let marketStage = null;
-const lastMarketStage = () => marketStage;
+//
+// Отметка у каждого поиска своя. Раньше переменная была одна на двоих, а
+// идеи и замены идут одновременно: успевший первым сбрасывал отметку в
+// null, и второй по своему отказу называл чужой шаг — либо не называл
+// никакого. Сообщение о причине не имеет смысла, если причина чужая.
+const marketStages = { ideas: null, swaps: null };
+const lastMarketStage = which => which
+  ? (marketStages[which] || null)
+  : (marketStages.ideas || marketStages.swaps || null);
 
 /**
  * Ключевая ставка: пробуем получить у ЦБ, иначе оставляем вписанную вручную.
@@ -6967,9 +6974,9 @@ async function refreshKeyRate() {
 }
 
 async function findIdeas(kind, filters = {}, opts = {}) {
-  marketStage = 'связь с биржей';
-  if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
-  marketStage = 'ставка денежного рынка';
+  marketStages.ideas = 'связь с биржей';
+  if (!(await moex.pingExchange())) { marketStages.ideas = 'нет доступа к бирже'; return null; }
+  marketStages.ideas = 'ставка денежного рынка';
   const st = await getState();
   const market = await marketContext();
   const ctx = {
@@ -7016,12 +7023,12 @@ async function findIdeas(kind, filters = {}, opts = {}) {
   if (kind === 'hedge') {
     // Защита. Фонды на золото — единственный доступный на бирже способ
     // добрать этот класс: отдельных «защитных акций» не бывает.
-    marketStage = 'список фондов';
+    marketStages.ideas = 'список фондов';
     const funds = await moex.fetchAllFunds();
     const gold = funds.filter(f => f.fundKind === 'gold')
       .sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
     const owned = new Set(ctx.ownedTickers);
-    marketStage = null;
+    marketStages.ideas = null;
     return {
       rows: gold.map(f => ({ ...f, kind: 'hedge',
         score: owned.has(f.ticker) ? 60 : 70,
@@ -7036,12 +7043,12 @@ async function findIdeas(kind, filters = {}, opts = {}) {
   }
 
   if (kind === 'bonds') {
-    marketStage = 'список облигаций';
+    marketStages.ideas = 'список облигаций';
     const rows = await moex.fetchAllBonds(filters.type ? [filters.type] : ['gov', 'corp']);
     return { rows: reports.screenBonds(rows, filters, ctx).slice(0, 40), total: rows.length, ctx };
   }
 
-  marketStage = 'список акций';
+  marketStages.ideas = 'список акций';
   const all = await moex.fetchAllStocks();
   // Короткий список: сперва грубые фильтры без выплат, потом — по капитализации,
   // и только двенадцати лидерам считаем дивиденды. Двадцать запросов не
@@ -7049,7 +7056,7 @@ async function findIdeas(kind, filters = {}, opts = {}) {
   const rough = reports.screenStocks(all, { ...filters, minYield: 0, minStreak: 0 }, ctx)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0))
     .slice(0, 30);          // биржа отвечает за доли секунды — можно смотреть шире
-  marketStage = 'истории выплат';
+  marketStages.ideas = 'истории выплат';
   const histories = await mapLimit(rough, 6, r => moex.fetchDividendHistory(r.ticker));
 
   // Три разных исхода, которые нельзя путать: биржа не ответила, ответила
@@ -7102,7 +7109,7 @@ async function findIdeas(kind, filters = {}, opts = {}) {
     }
   }
 
-  marketStage = null;
+  marketStages.ideas = null;
   return {
     rows: reports.screenStocks(rough, filters, ctx), total: all.length, ctx,
     market: { onBoard: all.length, checked: rough.length, paying: paying.length,
@@ -7118,9 +7125,9 @@ async function findIdeas(kind, filters = {}, opts = {}) {
  * по истории выплат.
  */
 async function findReplacements() {
-  marketStage = 'связь с биржей';
-  if (!(await moex.pingExchange())) { marketStage = 'нет доступа к бирже'; return null; }
-  marketStage = 'портфель';
+  marketStages.swaps = 'связь с биржей';
+  if (!(await moex.pingExchange())) { marketStages.swaps = 'нет доступа к бирже'; return null; }
+  marketStages.swaps = 'портфель';
   const st = await getState();
   const owned = st.positions.filter(p => p.qty > 0);
   const facts = [];
@@ -7132,7 +7139,7 @@ async function findReplacements() {
   if (myBonds.length) {
     // Денежный рынок как альтернатива облигациям: его доходность — это
     // сегодняшняя ставка, величина известная и проверяемая.
-    marketStage = 'список фондов';
+    marketStages.swaps = 'список фондов';
     try {
       const market = await marketContext();
       const rate = market && market.moneyRate > 0 ? market.moneyRate / 100 : 0;
@@ -7145,7 +7152,7 @@ async function findReplacements() {
       }
     } catch { /* фонды не пришли — сравним только с облигациями */ }
 
-    marketStage = 'список облигаций';
+    marketStages.swaps = 'список облигаций';
     const all = await moex.fetchAllBonds(['gov']);
     const mine = new Set(myBonds.map(p => p.ticker));
     for (const r of all) {
@@ -7158,12 +7165,12 @@ async function findReplacements() {
   if (myStocks.length) {
     // Свои акции — обязательно; кандидаты — двадцать крупнейших с рынка,
     // иначе это двести запросов истории выплат ради одного экрана.
-    marketStage = 'список акций';
+    marketStages.swaps = 'список акций';
     const all = await moex.fetchAllStocks();
     const mine = new Set(myStocks.map(p => p.ticker));
     const shortlist = all.filter(r => !mine.has(r.ticker))
       .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 12);
-    marketStage = 'истории выплат';
+    marketStages.swaps = 'истории выплат';
     const mineHist = await mapLimit(myStocks, 6, p => moex.fetchDividendHistory(p.ticker));
     myStocks.forEach((p, i) => {
       const row = all.find(r => r.ticker === p.ticker);
@@ -7195,7 +7202,7 @@ async function findReplacements() {
     });
   }
 
-  marketStage = null;
+  marketStages.swaps = null;
   return { ideas: SH.replacementIdeas(st, candidates, { facts }), checked: candidates.length };
 }
 
@@ -8703,12 +8710,58 @@ async function openForm(type) {
  * браузер их не пускает, а обещание так и не разрешается. Без ограничения
  * экран навсегда застревает на «Считаю…».
  */
-function withLimit(promise, seconds, fallback) {
+function withLimit(promise, seconds, fallback, outcome) {
+  // Четвёртым доводом можно передать пустой объект — в него запишется
+  // ПРИЧИНА подмены. Без этого отказ по времени и ошибка биржи выглядели
+  // одинаково: оба давали fallback, и раздел писал «биржа не ответила за
+  // 60 секунд» даже когда биржа ответила за долю секунды — отказом. Человек
+  // шёл проверять связь, связь была, и разбор упирался в тупик.
+  let noted = false;
+  let timer = null;
+  const note = (reason, extra) => {
+    if (!outcome || noted) return;
+    noted = true;
+    Object.assign(outcome, { reason, seconds }, extra || {});
+  };
   return Promise.race([
-    Promise.resolve(promise).catch(() => fallback),
-    new Promise(resolve => setTimeout(() => resolve(fallback), seconds * 1000))
-  ]);
+    Promise.resolve(promise).then(
+      value => { note(null); return value; },
+      error => { note('error', { error }); return fallback; }),
+    new Promise(resolve => {
+      timer = setTimeout(() => { note('timeout'); resolve(fallback); }, seconds * 1000);
+    })
+  // Таймер снимается в любом случае: раньше он доживал до конца отсчёта
+  // даже после успеха и держал замыкание живым.
+  ]).finally(() => clearTimeout(timer));
 }
+
+/**
+ * Почему поиск по рынку не дал результата. Три случая, и путать их нельзя:
+ * биржи не видно вовсе, биржа ответила отказом, поиск не уложился в срок.
+ * Раньше все три писались одинаково — «биржа не ответила за 60 секунд», —
+ * и человек шёл проверять связь, которая была в порядке.
+ *
+ * Отдельно про срок: потолок стоит на ВЕСЬ обход, а не на один запрос.
+ * Обход — это доска акций, доска ОФЗ, список фондов и по одной истории
+ * выплат на каждую бумагу. Каждый ответ приходит за доли секунды, а сумма
+ * упирается в минуту. Поэтому «не уложился» — правда, а «не ответила» —
+ * нет, и текст обязан это различать.
+ */
+function marketFailureNote(why, stage, tail, noAccess) {
+  const box = body => `<div class="muted" style="line-height:1.6">${body}</div>`;
+  if (stage === 'нет доступа к бирже') return box(noAccess);
+  const where = stage ? ` Остановилось на шаге «${esc(stage)}».` : '';
+  if (why && why.reason === 'error') {
+    const msg = why.error && (why.error.message || String(why.error));
+    return box(`Биржа ответила отказом, а не молчанием${msg ? `: ${esc(msg)}` : ''}.${where}
+      Связь при этом может быть в порядке — проверить можно в «Ещё → Диагностика». ${tail}`);
+  }
+  const limit = why && why.seconds ? why.seconds : null;
+  return box(`Поиск не уложился в${limit ? ` ${limit} с` : ' отведённое время'}.${where}
+    Это потолок на весь обход рынка, а не на один запрос: биржа успевает отвечать быстро,
+    но досок и историй выплат много. ${tail}`);
+}
+
 
 /**
  * Диагностика. Одно место, где видно всё состояние: сборка, хранилище,
@@ -9258,10 +9311,16 @@ async function openPlan() {
 
   // Какой класс искать: тот, которого не хватает сильнее. Защиту скринер
   // не ищет — у золота нет ни выплат, ни срока, сравнивать нечем.
+  // Доля защиты считается наравне с остальными. Раньше её тут не было, и
+  // `shares.hedge` выходило undefined: gapHedge становился NaN, любое
+  // сравнение с ним — ложью, и ветка защиты ниже не выбиралась никогда.
+  // Поиск молча уходил в акции даже тогда, когда сильнее всего не хватало
+  // золота, — а текст «искал защиту» лежал мёртвым кодом.
   const shares = st.summary.securities > 0
     ? { stocks: (st.summary.byClass.stocks || 0) / st.summary.securities,
-        bonds: (st.summary.byClass.bonds || 0) / st.summary.securities }
-    : { stocks: 0, bonds: 0 };
+        bonds: (st.summary.byClass.bonds || 0) / st.summary.securities,
+        hedge: (st.summary.byClass.hedge || 0) / st.summary.securities }
+    : { stocks: 0, bonds: 0, hedge: 0 };
   const gapStocks = (st.targets.stocks || 0) - shares.stocks;
   const gapBonds = (st.targets.bonds || 0) - shares.bonds;
   const gapHedge = (st.targets.hedge || 0) - shares.hedge;
@@ -9285,17 +9344,15 @@ async function openPlan() {
       const knownYields = (flow.rows || [])
         .filter(x => x.yieldPct > 0)
         .map(x => ({ ticker: x.ticker, yieldPct: x.yieldPct, streak: x.streak || 0 }));
-      const res = await withLimit(store.findIdeas(kind, filters, { knownYields }), 45, null);
+      const why = {};
+      const res = await withLimit(store.findIdeas(kind, filters, { knownYields }), 45, null, why);
       if (!box.isConnected && !box.innerHTML) return;      // лист закрыли — молча уходим
       if (!res) {
-        const stage = store.lastMarketStage();
-        box.innerHTML = stage === 'нет доступа к бирже'
-          ? `<div class="muted" style="line-height:1.6">Мосбиржа недоступна с этого устройства.
-              Чаще всего её режет VPN — выключи его и обнови страницу. Данные брокера идут другим путём,
-              поэтому портфель и советы работают, а поиск по рынку — нет.</div>`
-          : `<div class="muted" style="line-height:1.6">Биржа не ответила за 45 секунд${
-              stage ? ` — не дождался: ${esc(stage)}` : ''}. Поиск по рынку сейчас недоступен;
-              всё остальное в плане посчитано и работает.</div>`;
+        box.innerHTML = marketFailureNote(why, store.lastMarketStage('ideas'),
+          'Поиск по рынку сейчас недоступен; всё остальное в плане посчитано и работает.',
+          'Мосбиржа недоступна с этого устройства. Чаще всего её режет VPN — выключи его и обнови '
+          + 'страницу. Данные брокера идут другим путём, поэтому портфель и советы работают, '
+          + 'а поиск по рынку — нет.');
         return;
       }
       const st2 = await store.getState();
@@ -9319,14 +9376,13 @@ async function openPlan() {
     const box = $('swapsOut');
     if (!box) return;
     try {
-      const r = await withLimit(store.findReplacements(), 60, null);
+      const why = {};
+      const r = await withLimit(store.findReplacements(), 60, null, why);
       if (!r) {
-        const stage = store.lastMarketStage();
-        box.innerHTML = stage === 'нет доступа к бирже'
-          ? `<div class="muted" style="line-height:1.6">Мосбиржа недоступна с этого устройства —
-              скорее всего, из-за VPN. Сравнение с рынком появится, как только биржа станет доступна.</div>`
-          : `<div class="muted" style="line-height:1.6">Биржа не ответила за 60 секунд${
-              stage ? ` — не дождался: ${esc(stage)}` : ''}. Сравнение с рынком сейчас недоступно.</div>`;
+        box.innerHTML = marketFailureNote(why, store.lastMarketStage('swaps'),
+          'Сравнение с рынком сейчас недоступно.',
+          'Мосбиржа недоступна с этого устройства — скорее всего, из-за VPN. Сравнение с рынком '
+          + 'появится, как только биржа станет доступна.');
         return;
       }
       box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
@@ -9511,8 +9567,11 @@ function openWhatsNew() {
     <div style="font-weight:700;font-size:13.5px;margin-bottom:3px">${t}</div>
     <div class="muted" style="line-height:1.6">${d}</div></div>`;
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Что нового · сборка ${BUILD}</h2>
-    <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля и 3 августа. Отметка сборки внизу главной
+    <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля, 3 и 6 августа. Отметка сборки внизу главной
       обязана совпадать с именем скачанного файла — иначе открылся старый.</p>
+    ${item('Поиск по рынку перестал обходить защиту стороной', 'Раздел «что подходит портфелю» ищет тот класс, которого не хватает сильнее всего. Защита в этом сравнении не участвовала вовсе: её доля не попадала в расчёт, разность выходила нечислом, а любое сравнение с нечислом ложно. Выбор поэтому всегда падал на акции или облигации — даже когда золота 5% при цели 10% и не хватало именно его. Заготовленный текст «искал защиту: фонды на золото» лежал в коде мёртвым и не показывался ни разу.')}
+    ${item('«Биржа не ответила» больше не выдумывает молчание', 'Раздел писал «биржа не ответила за 60 секунд», а диагностика в ту же минуту получала ответ за 0,2 с. Оба были правы: потолок ожидания подменял результат одинаково и когда время вышло, и когда биржа ответила отказом, а надпись знала только про молчание. Теперь три случая различаются: биржи не видно вовсе, биржа ответила отказом (текст отказа показан) и поиск не уложился в срок. И сказано главное: потолок стоит на весь обход рынка — доски акций и ОФЗ, список фондов, по одной истории выплат на бумагу, — а не на один запрос. Быстрая биржа и долгий обход противоречат друг другу только на вид.')}
+    ${item('«Не дождался» называет свой шаг, а не соседний', 'Идеи и замены ищутся одновременно, а отметка шага была одна на двоих. Успевший первым сбрасывал её в ноль, и второй по своему отказу называл чужой шаг — или не называл никакого. Теперь отметка у каждого поиска своя.')}
     ${item('Биржу больше не спрашивают об одном дважды', 'Список акций нужен и разделу «что подходит портфелю», и «что можно поменять» — каждый качал его сам. На медленной сети выходило нелепое: идеи загрузились, а замены рядом написали «не дождался: список акций». Теперь ответ биржи живёт две минуты и достаётся обоим. То же с историями выплат — их запрашивается по одной на каждую бумагу рынка, и половина повторялась: теперь они живут полчаса, а одновременные вопросы об одной бумаге склеиваются в один запрос. Историю выплат качали две разные функции — теперь обе ходят одним путём. Проверка доступности биржи тоже помнит ответ полминуты: раньше она уходила в сеть перед каждым разбором.')}
     ${item('«Биржа не ответила» больше не выдумывает причину', 'Раньше в этом случае писалось «обычно так бывает, когда файл открыт прямо с устройства» — даже когда приложение открыто по ссылке и это видно в адресной строке. Теперь причина зависит от того, как приложение запущено, а при открытии по ссылке предлагается проверка доступа к бирже.')}
     ${item('Проценты пишутся по-русски', 'Рядом стояли «32,7% из 25%» и «14.9% выплат за год»: доли печатались через запятую, а доходности через точку. Переведены все 57 мест — теперь число одной величины выглядит одинаково на любом экране.')}
