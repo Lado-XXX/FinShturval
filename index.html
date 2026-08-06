@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-06b</title>
+<title>Штурвал · 2026-08-06n</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-06b';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-06n';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -262,7 +262,62 @@ function parseNumber(text) {
 const pct = v => {
   const x = (v || 0) * 100;
   const rounded = Math.round(x * 10) / 10;
-  return (Number.isInteger(rounded) ? rounded : rounded.toFixed(1).replace('.', ',')) + '%';
+  const body = Number.isInteger(rounded) ? String(Math.abs(rounded))
+    : Math.abs(rounded).toFixed(1).replace('.', ',');
+  // Знак минуса — тот же, что у денег рядом. Рубли печатались настоящим
+  // минусом, а проценты дефисом, и на одной строке позиции стояло
+  // «−682 ₽ · -1,5%»: два разных знака у одной и той же убыли.
+  return (rounded < 0 ? '−' : '') + body + '%';
+};
+
+/**
+ * Число с десятой долей — по тем же правилам, что и проценты: десятая
+ * показывается только когда она есть, разделитель русский. Без этого на
+ * экране стояло «резерва на 1.0 мес» рядом с «32,7%»: одна величина,
+ * два способа записи, и точка там, где по-русски запятая.
+ */
+/**
+ * Цена как число: сколько знаков у неё есть, столько и печатаем — но
+ * разделитель русский. Правило про запятую было заведено для процентов и
+ * сроков, а цены остались сырыми: на одном экране стояли «10,8%» и
+ * «195.85 ₽». Округлять здесь нельзя — у фондов цена вида 2,8045 ₽, и
+ * лишний знак у них не украшение, а разница в тысячах штук.
+ */
+/**
+ * ПРОГЛОЧЕННЫЕ ОШИБКИ.
+ *
+ * Три последние найденные поломки — вызов функции из чужого модуля, чтение
+ * переменной, которой нет, и событие мыши вместо числа — жили за
+ * проглоченным исключением. Приложение выглядело работающим и объясняло
+ * происходящее неправильно: «биржа не ответила» вместо «упал разбор».
+ *
+ * Глотать ошибки местами приходится: одна не пришедшая история выплат не
+ * повод рушить экран. Но глотать МОЛЧА нельзя. Всё, что поймано и не
+ * показано человеку, попадает сюда, а оттуда — в диагностику.
+ */
+const SWALLOWED_MAX = 25;
+const swallowedLog = [];
+function noteSwallowed(where, err) {
+  const msg = err && (err.message || String(err));
+  if (!msg) return;
+  const last = swallowedLog[swallowedLog.length - 1];
+  // Один и тот же отказ по десятку бумаг подряд — это одна беда, а не
+  // десять. Повтор считается, а не занимает место в списке.
+  if (last && last.where === where && last.message === msg) { last.count += 1; last.at = Date.now(); return; }
+  swallowedLog.push({ at: Date.now(), where: String(where || 'неизвестно'), message: msg, count: 1 });
+  if (swallowedLog.length > SWALLOWED_MAX) swallowedLog.shift();
+}
+function swallowedErrors() { return swallowedLog.slice().reverse(); }
+
+const dec = v => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return String(n).replace('.', ',');
+};
+
+const dec1 = v => {
+  const rounded = Math.round((Number(v) || 0) * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace('.', ',');
 };
 
 /**
@@ -374,7 +429,7 @@ function sectorOf(asset) {
   return null;
 }
 
-return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, PAYOUT_AGE, ASSUMED, share, inflationRate, moneyRate, parseNumber, pct, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
+return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, PAYOUT_AGE, ASSUMED, share, inflationRate, moneyRate, parseNumber, pct, dec, dec1, noteSwallowed, swallowedErrors, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
 })());
 
 /* ─── core/operations.js ─── */
@@ -1043,7 +1098,7 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
       notes.push(`Смысл может быть в другом: при снижении ставки длинная ОФЗ дорожает. Тогда она работает ценой, а не купоном.`);
     }
     if (long) {
-      parts.push(`До погашения ${r.yearsLeft.toFixed(1)} лет. Каждый процент изменения ставки двигает цену `
+      parts.push(`До погашения ${dec1(r.yearsLeft)} лет. Каждый процент изменения ставки двигает цену `
         + `примерно на ${pct(duration / 100)} — вниз при росте ставки и вверх при снижении.`);
       notes.push(`Если держать до погашения, колебания цены не важны: государство вернёт номинал.`);
     }
@@ -1099,12 +1154,12 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
     const gapMoney = netOfTax(lastValue * gapPct, state.settings);
     if (gapPct > 0.04 && gapMoney > 500) {
       const rub = v => Math.round(v).toLocaleString('ru-RU') + ' ₽';
-      const lastPct = ((last.row.yieldPct || 0) * 100).toFixed(1);
-      const topPct = ((top.row.yieldPct || 0) * 100).toFixed(1);
+      const lastPct = pct(last.row.yieldPct || 0);
+      const topPct = pct(top.row.yieldPct || 0);
       out.push({
         kind: 'yieldgap', urgency: 'info', ticker: last.p.ticker,
         title: last.row.yieldPct > 0
-          ? `Разница в выплатах: ${last.p.name} ${lastPct}% против ${topPct}% у ${top.p.name}`
+          ? `Разница в выплатах: ${last.p.name} ${lastPct} против ${topPct} у ${top.p.name}`
           : `${last.p.name} за 12 месяцев не выплатила ничего`,
         detail: `На твоей позиции в ${last.p.name} (${rub(lastValue)}) эта разница стоит `
           + `примерно ${rub(gapMoney)} в год чистыми — если бы те же деньги лежали в ${top.p.name}. `
@@ -1133,7 +1188,7 @@ function rebalancePlan(state, flow = { rows: [] }, market = {}) {
       out.push({
         kind: 'horizon', urgency: 'info', ticker: r.ticker,
         title: `${r.name} погашается позже цели`,
-        detail: `До погашения ${r.yearsLeft.toFixed(1)} лет, а до цели ${goalYears} — к нужному дню `
+        detail: `До погашения ${dec1(r.yearsLeft)} лет, а до цели ${goalYears} — к нужному дню `
           + `бумагу придётся продавать по рыночной цене, и она зависит от ставки в тот момент. `
           + `Облигация, погашаемая до цели, вернула бы номинал: её итог известен заранее.`,
         note: `Это не команда продавать: при снижении ставки длинная бумага, наоборот, дороже. `
@@ -1304,7 +1359,7 @@ function suggestStrategy(state) {
       : `До цели меньше трёх лет. Обвал на этом сроке восстановиться не успеет, поэтому сохранность важнее роста.`;
 
   const caution = thin
-    ? `Резерва хватает на ${months.toFixed(1)} мес вместо трёх. Пока он не собран, любая стратегия рискованна: `
+    ? `Резерва хватает на ${dec1(months)} мес вместо трёх. Пока он не собран, любая стратегия рискованна: `
       + `непредвиденный расход заставит продавать бумаги в неподходящий момент. Резерв важнее выбора стратегии.`
     : null;
 
@@ -1446,7 +1501,7 @@ function stressTest(assets, marketDrop = -0.30) {
 
 /**
  * Куда положить ближайший взнос — с точностью до бумаги и рубля.
- * Сумма делится между классами по степени недобора (allocate), внутри
+ * Сумма делится между классами по недобору ОТ БУДУЩЕЙ суммы (allocate), внутри
  * класса называется бумага с наибольшей фактической доходностью из уже
  * имеющихся. Новых имён приложение не выдумывает: подбор новой бумаги —
  * отдельный осознанный шаг, а не строка в плане.
@@ -1672,7 +1727,7 @@ function allSteps(state, summary, targets) {
           ? `Резерв ${pct(have / goal)} — дели взнос пополам`
           : 'Сначала резерв: он важнее доходности',
         detail: hasMonth
-          ? `Отложено ${money(have)} из ${money(goal)} (три месяца расходов). У тебя закрыт ${(have / monthly).toFixed(1)} месяц — от бытовых неожиданностей защищён, но не от потери дохода. ${half > 0 ? `План: ${money(half)}/мес в резерв и столько же в рынок — закроешь за ${monthsLeft} мес, не останавливая инвестиции.` : ''}`
+          ? `Отложено ${money(have)} из ${money(goal)} (три месяца расходов). У тебя закрыт ${dec1(have / monthly)} месяц — от бытовых неожиданностей защищён, но не от потери дохода. ${half > 0 ? `План: ${money(half)}/мес в резерв и столько же в рынок — закроешь за ${monthsLeft} мес, не останавливая инвестиции.` : ''}`
           : `Отложено ${money(have)} при расходах ${money(monthly)}/мес. Без резерва любая неожиданность заставит продавать бумаги в неподходящий момент — а это худший способ терять деньги.`,
         action: { type: 'reserve' },
         numbers: { have, goal, monthly }
@@ -2178,7 +2233,7 @@ function verdict(state, opts = {}) {
       what: reserve <= 0
         ? `Сначала резерв: откладывать ${money(half)} из взноса, пока не наберётся ${money(reserveTarget)}`
         : `Делить взнос пополам: ${money(half)} в резерв, ${money(monthly - half)} в рынок`,
-      why: `Отложено ${money(reserve)} — это ${months.toFixed(1)} мес жизни при расходах ${money(expenses)}. `
+      why: `Отложено ${money(reserve)} — это ${dec1(months)} мес жизни при расходах ${money(expenses)}. `
         + `Цель — три месяца. Пока подушки нет, любая просадка или потеря дохода заставит продавать бумаги `
         + `в худший момент, и убыток станет настоящим.`,
       weight: 1
@@ -2195,8 +2250,10 @@ function verdict(state, opts = {}) {
     const split = toMarket > 0 && opts.contribution.amount > toMarket + 1;
     steps.push({
       what: `Ближайший взнос ${money(opts.contribution.amount)}: ${parts.join(', ')}`,
-      why: `Деление — по степени недобора до целевых долей, а не по вкусу: класс, отстающий сильнее, `
-        + `получает больше. Так доли выравниваются сами, без продаж и без комиссий.`
+      why: `Деление — по недобору до целевых долей, посчитанному от суммы ПОСЛЕ взноса: класс, `
+        + `отстающий сильнее, получает больше. Поэтому класс, сегодня стоящий чуть выше цели, `
+        + `всё равно получает часть — иначе сам взнос сдвинул бы его долю вниз. `
+        + `Так доли выравниваются сами, без продаж и без комиссий.`
         // ДЕНЬГИ, КОТОРЫЕ УЖЕ ЛЕЖАТ. Приложение поминало свободный остаток
         // только когда его подозрительно много — от 20 000 ₽ и четверти
         // счёта, как признак незаписанной сделки. А полторы-две тысячи,
@@ -2322,7 +2379,7 @@ function verdict(state, opts = {}) {
     if (yearsLeft > 0 && goalYears < yearsLeft) {
       avoid.push({
         what: 'Не закрывать ИИС ради цели раньше срока',
-        why: `До окончания минимального срока ещё ${yearsLeft.toFixed(1)} года, а цель ты планируешь через `
+        why: `До окончания минимального срока ещё ${dec1(yearsLeft)} г., а цель ты планируешь через `
           + `${goalYears}. Закрытие раньше означает вернуть государству все полученные вычеты — `
           + `это дороже, чем подождать или взять деньги из другого источника.`
       });
@@ -2472,7 +2529,7 @@ function evaluate(candidate, purpose, context = {}) {
         reasons.push(`доходность к погашению ${pct(candidate.ytm)} годовых`);
       }
       if (candidate.yearsLeft != null) {
-        reasons.push(`погашение через ${candidate.yearsLeft.toFixed(1)} ${yearsWord(candidate.yearsLeft)} — деньги вернутся по номиналу`);
+        reasons.push(`погашение через ${dec1(candidate.yearsLeft)} ${yearsWord(candidate.yearsLeft)} — деньги вернутся по номиналу`);
       }
       if (candidate.yearsLeft > 7) {
         cautions.push('длинный выпуск: сильно дешевеет при росте ставки ЦБ, но и дорожает при снижении');
@@ -2549,7 +2606,11 @@ function yearsWord(n) {
  * Сравнение двух вариантов вложения одной суммы.
  * Показывает разницу в измеримых величинах — что получишь и чем рискуешь.
  */
-function compare(optionA, optionB, amount) {
+function compare(optionA, optionB, amount, settings) {
+  // Настройки приходят доводом. Раньше строка ниже читала `state` из
+  // воздуха: такой переменной здесь нет, и сравнение двух бумаг падало с
+  // «state is not defined» при каждом нажатии — молча, потому что
+  // обработчик кнопки ничего не ловит и лист просто замирал.
   const line = (o) => {
     const perYear = o.kind === 'bond'
       ? (o.annualCoupon || 0) * Math.floor(amount / (o.price || 1))
@@ -2559,7 +2620,7 @@ function compare(optionA, optionB, amount) {
       name: o.name,
       shares: Math.floor(amount / (o.price || 1)),
       incomePerYear: Math.round(perYear),
-      netPerYear: Math.round(netOfTax(perYear, state.settings)),
+      netPerYear: Math.round(netOfTax(perYear, settings)),
       yieldPct: o.price > 0 ? perYear / amount : 0,
       guaranteed: o.kind === 'bond'
     };
@@ -3495,6 +3556,7 @@ async function fetchJSON(url, timeoutMs = 8000) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     const e = new Error('нет сети'); e.reason = FAIL.OFFLINE; throw e;
   }
+  const startedAt = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -3507,8 +3569,16 @@ async function fetchJSON(url, timeoutMs = 8000) {
     // биржа недоступна.
     if (err.name !== 'AbortError' && typeof document !== 'undefined'
         && String(url).startsWith('https://iss.moex.com')) {
-      try { return await fetchJSONP(url, timeoutMs); }
-      catch { /* и запасной путь не помог — расскажем про первую ошибку */ }
+      // Запасному пути достаётся ОСТАТОК потолка, а не столько же снова.
+      // Раньше запрос с заявленными двадцатью секундами мог занять сорок:
+      // сначала отказ, потом полный отсчёт заново. Из-за этого сумма
+      // внутренних потолков вдвое перекрывала общий срок поиска, и обход
+      // не укладывался в него, хотя каждый ответ приходил быстро.
+      const left = timeoutMs - (Date.now() - startedAt);
+      if (left >= 1000) {
+        try { return await fetchJSONP(url, left); }
+        catch { /* и запасной путь не помог — расскажем про первую ошибку */ }
+      }
     }
     if (err.reason) throw err;
     if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
@@ -3726,7 +3796,7 @@ async function fetchKeyRate(timeoutMs = 8000) {
     const last = items[items.length - 1];
     const value = parseFloat(String(last[2]).replace(',', '.'));
     return value > 0 && value < 100 ? { rate: value / 100, date: last[1].slice(0, 10) } : null;
-  } catch { return null; }
+  } catch (err) { noteSwallowed('ключевая ставка ЦБ', err); return null; }
   finally { clearTimeout(timer); }
 }
 
@@ -3759,7 +3829,7 @@ async function pingExchangeRaw(timeout = 5000) {
     const j = await fetchJSON(`${ISS}/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json`
       + `?iss.meta=off&iss.only=marketdata&marketdata.columns=SECID`, timeout);
     return !!(j && j.marketdata);
-  } catch { return false; }
+  } catch (err) { noteSwallowed('проверка связи с биржей', err); return false; }
 }
 
 /**
@@ -3881,7 +3951,7 @@ async function fetchAllBondsRaw(kinds = ['gov'], maxPages = 3) {
           + `&securities.columns=SECID,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONVALUE,COUPONPERCENT,COUPONPERIOD,FACEVALUE,PREVPRICE`
           + `&marketdata_yields.columns=SECID,EFFECTIVEYIELD,DURATION`
           + `&marketdata.columns=SECID,VALTODAY`, 15000);
-      } catch { break; }
+      } catch (err) { noteSwallowed('страница доски облигаций', err); break; }
       const secPage = tableRows(j?.securities);
       rows.push(...secPage);
       yieldRows.push(...tableRows(j?.marketdata_yields));
@@ -3935,7 +4005,11 @@ async function fetchAllBondsRaw(kinds = ['gov'], maxPages = 3) {
         // У государственных бумаг тип зашит в номер серии, и это факт, а не
         // догадка: 29 и 24 — переменный купон, 52 — индексируемый номинал.
         // Для остальных остаётся прежний признак.
-        couponType: ofzKind(r.SECID) || (r.COUPONVALUE > 0 ? 'fixed' : 'float'),
+        // Через SH: модули закрыты друг от друга, и голое имя из ядра здесь
+        // не видно. Раньше тут стоял прямой вызов, и разбор ЛЮБОЙ облигации
+        // падал с «ofzKind is not defined» — а наружу это выходило как
+        // «биржа не ответила», потому что доска ОФЗ нужна обоим поискам.
+        couponType: SH.ofzKind(r.SECID) || (r.COUPONVALUE > 0 ? 'fixed' : 'float'),
         type
       });
     }
@@ -4028,7 +4102,7 @@ const fetchAllFunds = () => cachedBoard('funds', fetchAllFundsRaw);
 const fetchAllBonds = (kinds = ['gov'], maxPages = 3) =>
   cachedBoard(`bonds:${[...kinds].sort().join(',')}:${maxPages}`, () => fetchAllBondsRaw(kinds, maxPages));
 
-return {FAIL, clearMarketMemory, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
+return {FAIL, clearMarketMemory, fetchJSON, fetchPrices, search, fetchMarketPulse, fetchIndexHistory, pingExchange, probeExchange,
         fetchKeyRate, fetchAllStocks, fetchAllBonds, fetchAllFunds, fetchDividendHistory};
 })());
 
@@ -5195,7 +5269,7 @@ async function tiInstrument(token, id, cache) {
     // так и остался бы неизвестным, и план советовал бы «111 штук».
     if (i) found = { ticker: (i.ticker || '').toUpperCase(), name: i.name || i.ticker,
                      kind: i.instrumentKind || '', lot: Number(i.lot) > 0 ? Number(i.lot) : 1 };
-  } catch { /* бумага могла быть делистингована — вернём пусто */ }
+  } catch (err) { noteSwallowed('карточка бумаги у брокера', err); }
   cache.set(id, found);
   return found;
 }
@@ -5260,7 +5334,8 @@ async function tiOperations(token, accountId, from = '2000-01-01', known = {}) {
       const qty = Math.abs(Number(it.quantityDone || it.quantity || 0));
       if (!(qty > 0) || !(payment > 0)) { skipped.push(it.description || it.type); continue; }
       let sec = null;
-      try { sec = await tiInstrument(token, it.instrumentUid, cache); } catch { sec = null; }
+      try { sec = await tiInstrument(token, it.instrumentUid, cache); }
+      catch (err) { sec = null; noteSwallowed('бумага по операции брокера', err); }
       if (!(sec && sec.ticker)) {
         const remembered = known[it.instrumentUid];
         if (remembered && remembered.ticker) sec = remembered;
@@ -5337,7 +5412,8 @@ async function tiPortfolio(token, accountId, known = {}) {
     if (!(qty > 0)) continue;
 
     let sec = null;
-    try { sec = await tiInstrument(token, p.instrumentUid, cache); } catch { sec = null; }
+    try { sec = await tiInstrument(token, p.instrumentUid, cache); }
+    catch (err) { sec = null; noteSwallowed('бумага в портфеле брокера', err); }
 
     const remembered = known[p.instrumentUid];
     let ticker, name;
@@ -5971,69 +6047,13 @@ Object.assign(SH, (function(){
 
 const ISS = 'https://iss.moex.com/iss';
 
-/** Запасной путь к бирже — тот же, что в moex.js. */
-function fetchJSONP(url, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    const name = `__shturvalIss${Date.now()}${Math.floor(Math.random() * 1e6)}`;
-    const script = document.createElement('script');
-    let done = false;
-
-    const cleanup = () => {
-      done = true;
-      try { delete window[name]; } catch { window[name] = undefined; }
-      if (script.parentNode) script.parentNode.removeChild(script);
-    };
-    const timer = setTimeout(() => {
-      if (done) return;
-      cleanup();
-      const e = new Error('биржа не ответила'); e.reason = FAIL.TIMEOUT; reject(e);
-    }, timeoutMs);
-
-    window[name] = data => { if (done) return; clearTimeout(timer); cleanup(); resolve(data); };
-    script.onerror = () => {
-      if (done) return;
-      clearTimeout(timer); cleanup();
-      const e = new Error('биржа недоступна'); e.reason = FAIL.NETWORK; reject(e);
-    };
-
-    script.src = url + (url.includes('?') ? '&' : '?') + `callback=${name}`;
-    document.head.appendChild(script);
-  });
-}
-
-async function fetchJSON(url, timeoutMs = 8000) {
-  // Та же реализация, что в data/moex.js: причина отказа важна не меньше
-  // самого отказа. Раньше здесь была упрощённая версия, и одно и то же
-  // молчание биржи объяснялось человеку по-разному в зависимости от того,
-  // какой экран спросил.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    const e = new Error('нет сети'); e.reason = FAIL.OFFLINE; throw e;
-  }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
-    if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.reason = FAIL.SERVER; throw e; }
-    return await r.json();
-  } catch (err) {
-    // Обычный запрос не прошёл. Если это не наш таймаут, пробуем запасной
-    // путь: очень часто дело в запрете читать чужой ответ, а не в том, что
-    // биржа недоступна.
-    if (err.name !== 'AbortError' && typeof document !== 'undefined'
-        && String(url).startsWith('https://iss.moex.com')) {
-      try { return await fetchJSONP(url, timeoutMs); }
-      catch { /* и запасной путь не помог — расскажем про первую ошибку */ }
-    }
-    if (err.reason) throw err;
-    if (err.name === 'AbortError') { err.reason = FAIL.TIMEOUT; throw err; }
-    // При открытии файла напрямую (file://) браузер запрещает запросы наружу.
-    // Ошибка сети в этом случае неотличима от отсутствия интернета — различаем по адресу.
-    err.reason = openedLocally() ? FAIL.BLOCKED : FAIL.OFFLINE;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/**
+ * Запрос к бирже и запасной путь к ней живут в data/moex.js — здесь были
+ * их копии. Копии обязаны совпадать побайтово, иначе сообщение об ошибке
+ * зависит от того, кто спросил; проверка это стерегла, но чинить две
+ * одинаковые функции руками — способ однажды ошибиться. Теперь тело одно,
+ * а сюда оно приходит через связывание.
+ */
 
 const col = (data, name) => {
   const i = (data.columns || []).indexOf(name);
@@ -6929,7 +6949,10 @@ async function mapLimit(items, limit, fn) {
     while (true) {
       const i = next++;
       if (i >= items.length) return;
-      try { out[i] = await fn(items[i], i); } catch { out[i] = null; }
+      // Ошибка одной бумаги не рушит экран, но и не исчезает бесследно:
+      // ровно так пряталась поломка разбора, выглядевшая как молчание биржи.
+      try { out[i] = await fn(items[i], i); }
+      catch (err) { out[i] = null; noteSwallowed('запрос по одной бумаге', err); }
     }
   });
   await Promise.all(workers);
@@ -7124,9 +7147,18 @@ async function findIdeas(kind, filters = {}, opts = {}) {
  * же берётся их сегодняшняя доходность к погашению; свои акции —
  * по истории выплат.
  */
-async function findReplacements() {
+async function findReplacements(opts = {}) {
   marketStages.swaps = 'связь с биржей';
   if (!(await moex.pingExchange())) { marketStages.swaps = 'нет доступа к бирже'; return null; }
+  // ОБЩИЙ СРОК. Потолок ожидания снаружи режет весь обход разом: не успел —
+  // нет ничего. При этом сумма внутренних потолков (доска ОФЗ, доска акций,
+  // истории выплат) заведомо больше внешнего срока, то есть обход мог не
+  // уложиться, даже когда каждый ответ приходил быстро. Теперь поиск сам
+  // смотрит на часы: если на следующий класс времени не осталось, он его
+  // не начинает и честно помечает непроверенным — вместо того чтобы быть
+  // убитым снаружи вместе с уже собранным.
+  const deadline = Number(opts.deadline) || 0;
+  const msLeft = () => (deadline ? deadline - Date.now() : Infinity);
   marketStages.swaps = 'портфель';
   const st = await getState();
   const owned = st.positions.filter(p => p.qty > 0);
@@ -7135,75 +7167,106 @@ async function findReplacements() {
 
   const myBonds = owned.filter(p => allocationClass(p) === 'bonds');
   const myStocks = owned.filter(p => allocationClass(p) === 'stocks');
+  // Что не удалось проверить. Раньше отказ на одном классе отменял оба:
+  // облигации уже собраны, падение на доске акций — и раздел пуст целиком.
+  // Половина сравнения полезнее пустоты, но молчать о второй половине нельзя.
+  const missed = [];
 
   if (myBonds.length) {
-    // Денежный рынок как альтернатива облигациям: его доходность — это
-    // сегодняшняя ставка, величина известная и проверяемая.
-    marketStages.swaps = 'список фондов';
-    try {
-      const market = await marketContext();
-      const rate = market && market.moneyRate > 0 ? market.moneyRate / 100 : 0;
-      if (rate > 0) {
-        const funds = await moex.fetchAllFunds();
-        for (const f of funds.filter(x => x.fundKind === 'money')
-                             .sort((a, b) => (b.turnover || 0) - (a.turnover || 0)).slice(0, 3)) {
-          candidates.push({ ...f, kind: 'bond', ytm: rate, yearsLeft: 0 });
+    // Кандидаты этого класса копятся отдельно и попадают в общий список
+    // только целиком. Иначе вышло бы худшее: фонды денежного рынка уже в
+    // кандидатах, а доходности своих облигаций не пришли — и приложение
+    // предложило бы обменять бумагу, о которой ничего не знает.
+    const bondCands = [];
+    // На доску ОФЗ с запасом нужно секунд двадцать. Меньше — не начинаем:
+    // лучше сразу сказать, что класс не проверен, чем потратить остаток
+    // времени впустую и не показать ничего.
+    if (msLeft() < 20000) {
+      missed.push({ what: 'облигации', why: 'не осталось времени' });
+    } else try {
+      // Денежный рынок как альтернатива облигациям: его доходность — это
+      // сегодняшняя ставка, величина известная и проверяемая.
+      marketStages.swaps = 'список фондов';
+      try {
+        const market = await marketContext();
+        const rate = market && market.moneyRate > 0 ? market.moneyRate / 100 : 0;
+        if (rate > 0) {
+          const funds = await moex.fetchAllFunds();
+          for (const f of funds.filter(x => x.fundKind === 'money')
+                               .sort((a, b) => (b.turnover || 0) - (a.turnover || 0)).slice(0, 3)) {
+            bondCands.push({ ...f, kind: 'bond', ytm: rate, yearsLeft: 0 });
+          }
         }
-      }
-    } catch { /* фонды не пришли — сравним только с облигациями */ }
+      } catch (err) { noteSwallowed('список фондов', err); }
 
-    marketStages.swaps = 'список облигаций';
-    const all = await moex.fetchAllBonds(['gov']);
-    const mine = new Set(myBonds.map(p => p.ticker));
-    for (const r of all) {
-      if (mine.has(r.ticker)) facts.push({ ticker: r.ticker, ytm: r.ytm, yearsLeft: r.yearsLeft,
-                                           couponType: r.couponType });
-      else candidates.push({ ...r, kind: 'bond' });
+      marketStages.swaps = 'список облигаций';
+      const all = await moex.fetchAllBonds(['gov']);
+      const mine = new Set(myBonds.map(p => p.ticker));
+      for (const r of all) {
+        if (mine.has(r.ticker)) facts.push({ ticker: r.ticker, ytm: r.ytm, yearsLeft: r.yearsLeft,
+                                             couponType: r.couponType });
+        else bondCands.push({ ...r, kind: 'bond' });
+      }
+      candidates.push(...bondCands);
+    } catch (err) {
+      missed.push({ what: 'облигации', why: (err && err.message) || String(err) });
     }
   }
 
   if (myStocks.length) {
-    // Свои акции — обязательно; кандидаты — двадцать крупнейших с рынка,
-    // иначе это двести запросов истории выплат ради одного экрана.
-    marketStages.swaps = 'список акций';
-    const all = await moex.fetchAllStocks();
-    const mine = new Set(myStocks.map(p => p.ticker));
-    const shortlist = all.filter(r => !mine.has(r.ticker))
-      .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 12);
-    marketStages.swaps = 'истории выплат';
-    const mineHist = await mapLimit(myStocks, 6, p => moex.fetchDividendHistory(p.ticker));
-    myStocks.forEach((p, i) => {
-      const row = all.find(r => r.ticker === p.ticker);
-      const hist = mineHist[i];
-      // Биржа промолчала — это НЕ «выплат ноль». Ноль здесь означал бы, что
-      // своя бумага не платит ничего, и любая чужая выглядела бы выгоднее
-      // на всю свою доходность. Неизвестность так и передаётся дальше:
-      // про такую бумагу обмен не предлагается вовсе.
-      facts.push(hist
-        ? { ticker: p.ticker, yieldPct: R2.trailingYield(hist, (row && row.price) || p.price),
-            streak: R2.payoutStreak(hist) }
-        : { ticker: p.ticker, yieldPct: null, streak: 0 });
-    });
+    // Акциям нужно больше: доска плюс истории выплат по своим и по дюжине
+    // кандидатов. Не хватает — класс честно остаётся непроверенным.
+    if (msLeft() < 25000) {
+      missed.push({ what: 'акции', why: 'не осталось времени' });
+    } else try {
+      // Свои акции — обязательно; кандидаты — двенадцать крупнейших с рынка,
+      // иначе это двести запросов истории выплат ради одного экрана.
+      marketStages.swaps = 'список акций';
+      const all = await moex.fetchAllStocks();
+      const mine = new Set(myStocks.map(p => p.ticker));
+      const shortlist = all.filter(r => !mine.has(r.ticker))
+        .sort((a, b) => (b.cap || 0) - (a.cap || 0)).slice(0, 12);
+      marketStages.swaps = 'истории выплат';
+      const mineHist = await mapLimit(myStocks, 6, p => moex.fetchDividendHistory(p.ticker));
+      myStocks.forEach((p, i) => {
+        const row = all.find(r => r.ticker === p.ticker);
+        const hist = mineHist[i];
+        // Биржа промолчала — это НЕ «выплат ноль». Ноль здесь означал бы, что
+        // своя бумага не платит ничего, и любая чужая выглядела бы выгоднее
+        // на всю свою доходность. Неизвестность так и передаётся дальше:
+        // про такую бумагу обмен не предлагается вовсе.
+        facts.push(hist
+          ? { ticker: p.ticker, yieldPct: R2.trailingYield(hist, (row && row.price) || p.price),
+              streak: R2.payoutStreak(hist) }
+          : { ticker: p.ticker, yieldPct: null, streak: 0 });
+      });
 
-    const candHist = await mapLimit(shortlist, 6, r => moex.fetchDividendHistory(r.ticker));
-    shortlist.forEach((r, i) => {
-      const hist = candHist[i];
-      if (!hist) return;      // без истории выплат бумага в кандидаты не годится
-      const detail = R2.trailingYieldDetailed(hist, r.price);
-      candidates.push({ ...r, kind: 'stock',
-                        yieldPct: detail ? detail.yieldPct : null,
-                        yieldSuspect: detail ? detail.suspect : null,
-                        payouts: detail ? detail.payouts : 0,
-                        // Свежесть выплат едет вместе с их размером: «платит N лет
-                        // подряд» без даты последней выплаты — половина правды.
-                        payoutAgeDays: detail ? detail.ageDays : null,
-                        payoutLastDate: detail ? detail.lastDate : null,
-                        streak: R2.payoutStreak(hist) });
-    });
+      const candHist = await mapLimit(shortlist, 6, r => moex.fetchDividendHistory(r.ticker));
+      shortlist.forEach((r, i) => {
+        const hist = candHist[i];
+        if (!hist) return;      // без истории выплат бумага в кандидаты не годится
+        const detail = R2.trailingYieldDetailed(hist, r.price);
+        candidates.push({ ...r, kind: 'stock',
+                          yieldPct: detail ? detail.yieldPct : null,
+                          yieldSuspect: detail ? detail.suspect : null,
+                          payouts: detail ? detail.payouts : 0,
+                          // Свежесть выплат едет вместе с их размером: «платит N лет
+                          // подряд» без даты последней выплаты — половина правды.
+                          payoutAgeDays: detail ? detail.ageDays : null,
+                          payoutLastDate: detail ? detail.lastDate : null,
+                          streak: R2.payoutStreak(hist) });
+      });
+    } catch (err) {
+      missed.push({ what: 'акции', why: (err && err.message) || String(err) });
+    }
   }
 
+  // Собрать не удалось ничего — это отказ, а не половина ответа. Пусть
+  // раздел назовёт причину обычным путём, вместе с шагом.
+  if (missed.length && !candidates.length) return null;
+
   marketStages.swaps = null;
-  return { ideas: SH.replacementIdeas(st, candidates, { facts }), checked: candidates.length };
+  return { ideas: SH.replacementIdeas(st, candidates, { facts }), checked: candidates.length, missed };
 }
 
 /** Данные по любой бумаге, не только из портфеля. */
@@ -7462,6 +7525,11 @@ const parseCashOps = SH.parseCashOps;
 const parsePortfolio = SH.parsePortfolio;
 const parseNumber = SH.parseNumber;
 const pct = SH.pct;
+const fetchJSON = SH.fetchJSON;
+const noteSwallowed = SH.noteSwallowed;
+const swallowedErrors = SH.swallowedErrors;
+const dec = SH.dec;
+const dec1 = SH.dec1;
 const ASSUMED = SH.ASSUMED;
 const share = SH.share;
 const inflationRate = SH.inflationRate;
@@ -7822,7 +7890,7 @@ function viewHome(st) {
         <div class="muted" style="margin-top:8px">
           ${pctDone >= 100
             ? 'Три месяца расходов закрыты — можно спокойно инвестировать весь взнос.'
-            : `Хватит на ${months.toFixed(1)} ${months < 1 ? 'месяца' : months < 5 ? 'месяца' : 'месяцев'} жизни. Цель — три месяца: столько нужно, чтобы пережить потерю дохода, не продавая бумаги.`}
+            : `Хватит на ${dec1(months)} ${months < 1 ? 'месяца' : months < 5 ? 'месяца' : 'месяцев'} жизни. Цель — три месяца: столько нужно, чтобы пережить потерю дохода, не продавая бумаги.`}
         </div>
         ${pctDone < 100 ? `<button class="btn ghost wide" id="bAddRes2" style="margin-top:10px">Пополнить резерв</button>` : ''}
       </div>`;
@@ -7949,12 +8017,12 @@ function viewPortfolio(st) {
         return `<div class="pos" data-sec="${esc(p.ticker)}" style="cursor:pointer">
           <div>
             <div class="t">${esc(p.name)}</div>
-            <div class="n">${p.qty} шт · ${p.price} ₽${known ? '' : ' <span style="color:var(--warn)">цена покупки</span>'}</div>
+            <div class="n">${p.qty} шт · ${dec(p.price)} ₽${known ? '' : ' <span style="color:var(--warn)">цена покупки</span>'}</div>
           </div>
           <div class="v">
             <div>${money(v)}</div>
             <div class="p ${known ? (diff >= 0 ? 'up' : 'down') : 'muted'}">${known
-              ? (diff >= 0 ? '+' : '−') + money(Math.abs(diff)) + ' · ' + (r * 100).toFixed(1) + '%'
+              ? (diff >= 0 ? '+' : '−') + money(Math.abs(diff)) + ' · ' + pct(r)
               : '—'}</div>
           </div>
         </div>`;
@@ -7966,7 +8034,7 @@ function viewPortfolio(st) {
       <div class="sum" style="font-size:30px">${money(s.securities)}</div>
       <div class="sub">${owned.length} ${owned.length === 1 ? 'бумага' : owned.length < 5 ? 'бумаги' : 'бумаг'}${
         st.returnRateReliable && st.returnRate != null
-          ? ' · доходность ' + (st.returnRate * 100).toFixed(1) + '% годовых'
+          ? ' · доходность ' + pct(st.returnRate) + ' годовых'
           : st.historyDays ? ' · история ' + st.historyDays + ' дн' : ''}</div></div>
 
     ${groups.map(block).join('')}
@@ -8114,8 +8182,14 @@ function viewJournal(st) {
                   withdraw: 'Вывод', dividend: 'Выплата', fee: 'Комиссия', reserve: 'В резерв' };
   // Знак показывает направление денег: пришло на счёт или ушло с него.
   const incoming = { sell: true, deposit: true, dividend: true };
+  // Два падежа, и путать их нельзя. В дате месяц отвечает на вопрос «когда»
+  // и стоит в родительном: «16 июня». Заголовок группы — это название
+  // месяца само по себе, именительный: «Июнь 2026». Раньше список был один,
+  // и над лентой стояло «ИЮНЯ 2026» — обрывок фразы вместо заголовка.
   const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
                   'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+  const MONTH_TITLES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+                        'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
   const recent = st.ops.slice().sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 80);
 
@@ -8126,7 +8200,7 @@ function viewJournal(st) {
     const key = String(o.date).slice(0, 7);
     if (!chunks.length || chunks[chunks.length - 1].key !== key) {
       const [y, m] = key.split('-');
-      chunks.push({ key, title: `${MONTHS[Number(m) - 1]} ${y}`, list: [] });
+      chunks.push({ key, title: `${MONTH_TITLES[Number(m) - 1]} ${y}`, list: [] });
     }
     chunks[chunks.length - 1].list.push(o);
   }
@@ -8139,7 +8213,7 @@ function viewJournal(st) {
         <div class="t" style="${o.technical ? 'opacity:.6' : ''}">${names[o.type] || o.type}${
           o.ticker ? ' · ' + esc(o.ticker) : ''}</div>
         <div class="n">${day} ${MONTHS[Number(String(o.date).slice(5, 7)) - 1].slice(0, 3)}${
-          o.qty ? ' · ' + o.qty + ' шт по ' + o.price + ' ₽' : ''}${
+          o.qty ? ' · ' + o.qty + ' шт по ' + dec(o.price) + ' ₽' : ''}${
           o.technical ? ' · служебная' : o.note ? ' · ' + esc(o.note) : ''}</div>
       </div>
       <div class="v"><div style="color:${plus ? 'var(--ok)' : 'var(--text)'}">${
@@ -8264,7 +8338,7 @@ function viewSettings(st) {
             const k = st.settings.keyRate;
             if (!k) return 'не задана — впиши, приложение сверяется с ней';
             const days = Math.round((Date.now() - new Date(k.date).getTime()) / 86400000);
-            return `${(k.rate * 100).toFixed(2)}% от ${k.date.split('-').reverse().join('.')}`
+            return `${dec((k.rate * 100).toFixed(2))}% от ${k.date.split('-').reverse().join('.')}`
               + (days > 120 ? ' · старше четырёх месяцев, проверь' : '')
               + (k.source === 'ЦБ' ? ' · от ЦБ' : ' · вписана вручную');
           })()}</span></span>
@@ -8347,7 +8421,7 @@ function bind(st) {
   on('bFixPrices', openSync);
   on('bSync2', openSync); on('bSync3', openSync);
   on('bFlow', openCashflow);
-  on('bCrash', openCrashTest);
+  on('bCrash', () => openCrashTest());
   on('bAddDep', () => openForm('deposit'));
   on('bAddTrade', () => openForm('buy'));
   on('bAddDiv', () => openForm('dividend'));
@@ -8514,7 +8588,7 @@ async function drawEvents() {
 
   const when = n => n === 0 ? 'сегодня' : n === 1 ? 'завтра'
     : n < 31 ? `через ${n} ${n % 10 === 1 && n !== 11 ? 'день' : n % 10 >= 2 && n % 10 <= 4 && (n < 12 || n > 14) ? 'дня' : 'дней'}`
-    : n < 365 ? `через ${Math.round(n / 30)} мес` : `через ${(n / 365).toFixed(1)} года`;
+    : n < 365 ? `через ${Math.round(n / 30)} мес` : `через ${dec1(n / 365)} г.`;
   const colour = n => n <= 7 ? 'var(--warn)' : n <= 30 ? 'var(--info)' : 'var(--dim)';
 
   card.style.display = 'block';
@@ -8639,7 +8713,7 @@ async function doParse() {
     <p class="muted" style="margin:0 0 12px">${changes.length ? 'Что изменится:' : 'Всё совпадает — менять нечего.'}</p>
     ${changes.map(c => `<div class="diff"><b>${esc(c.name || c.ticker)}</b> — ${label[c.kind]}
       ${c.kind === 'qty' ? '<span class="muted">(' + c.from + ' → ' + c.to + ' шт)</span>' : ''}
-      ${c.kind === 'add' ? '<span class="muted">(' + c.qty + ' шт по ' + c.avgPrice + ' ₽)</span>' : ''}
+      ${c.kind === 'add' ? '<span class="muted">(' + c.qty + ' шт по ' + dec(c.avgPrice) + ' ₽)</span>' : ''}
       ${c.kind === 'gone' ? '<span class="muted">(было ' + c.from + ' шт)</span>' : ''}</div>`).join('')}
     ${parsed.cash != null ? '<div class="diff">Свободные деньги: <b>' + money(parsed.cash) + '</b></div>' : ''}
     ${parsed.unknown.length ? '<div class="muted" style="margin-top:10px">Не понял: ' + parsed.unknown.map(esc).join(', ') + '</div>' : ''}
@@ -8726,7 +8800,7 @@ function withLimit(promise, seconds, fallback, outcome) {
   return Promise.race([
     Promise.resolve(promise).then(
       value => { note(null); return value; },
-      error => { note('error', { error }); return fallback; }),
+      error => { note('error', { error }); noteSwallowed('ожидание с потолком', error); return fallback; }),
     new Promise(resolve => {
       timer = setTimeout(() => { note('timeout'); resolve(fallback); }, seconds * 1000);
     })
@@ -8871,7 +8945,26 @@ async function openDiagnostics() {
     <button class="btn ghost wide" id="bProbeTi" style="margin-bottom:10px">Проверить доступ к Т-Банку</button>
     <div id="probeTiOut"></div>
     <button class="btn wide" id="bDiagSync">Собрать журнал заново</button>
-    <div id="bDiagOut"></div>`);
+    <div id="bDiagOut"></div>
+
+    ${(() => {
+      // Ошибки, пойманные и не показанные человеку. Пока их не было видно,
+      // приложение объясняло происходящее неправильно: разбор падал, а на
+      // экране стояло «биржа не ответила». Пусто здесь — хороший знак.
+      const log = swallowedErrors();
+      if (!log.length) return `<div id="diagSwallowed"><div style="height:16px"></div>
+        <div class="muted" style="line-height:1.6">Пойманных и скрытых ошибок нет.
+          Здесь появляется всё, что приложение проглотило само, — чтобы причина
+          сбоя не подменялась догадкой.</div></div>`;
+      return `<div id="diagSwallowed"><div style="height:16px"></div>
+        <div class="muted" style="margin-bottom:6px">СКРЫТЫЕ ОШИБКИ (${log.length})</div>
+        <div class="muted" style="line-height:1.6;margin-bottom:8px">Приложение поймало их само и
+          продолжило работать. Если экран ведёт себя странно — причина, скорее всего, здесь.</div>
+        ${log.map(e => `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
+          <span class="muted">${esc(e.where)}${e.count > 1 ? ` · ${e.count} раза` : ''}</span>
+          <span style="color:var(--warn);text-align:right">${esc(e.message)}</span>
+        </div>`).join('')}</div>`;
+    })()}`);
 
   // Что лежит на сервере — сразу, без ожидания действий человека.
   async function showServerBuild() {
@@ -8913,7 +9006,7 @@ async function openDiagnostics() {
         <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
           <span class="muted" style="flex:1">${esc(r.name)}</span>
           <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
-            r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
+            r.ok ? `ответ за ${dec1(r.ms / 1000)} с` : `сбой за ${dec1(r.ms / 1000)} с`}</span>
         </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
         ${note ? `<div class="muted" style="margin-top:8px;line-height:1.6">${esc(note)}</div>` : ''}</div>`;
     };
@@ -8971,7 +9064,7 @@ async function openDiagnostics() {
         <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
           <span class="muted" style="flex:1">${esc(r.name)}</span>
           <span style="text-align:right;white-space:nowrap;color:${r.ok ? 'var(--ok)' : 'var(--danger)'}">${
-            r.ok ? `ответ за ${(r.ms / 1000).toFixed(1)} с` : `сбой за ${(r.ms / 1000).toFixed(1)} с`}</span>
+            r.ok ? `ответ за ${dec1(r.ms / 1000)} с` : `сбой за ${dec1(r.ms / 1000)} с`}</span>
         </div>${r.ok ? '' : `<div class="muted" style="font-size:11px;padding:2px 0 6px">${esc(r.error)}</div>`}`).join('')}
         ${note ? `<div class="muted" style="margin-top:8px;line-height:1.6">${esc(note)}</div>` : ''}</div>`;
     };
@@ -9140,6 +9233,12 @@ async function portfolioFacts() {
   const token = await store.getMeta('tiToken');
   const account = await store.getMeta('tiAccount');
   if (token && account) {
+    // Состояние берётся здесь. Раньше строка ниже читала `st` из воздуха:
+    // такой переменной в этой функции нет и не было, и при подключённом
+    // брокере вызов падал с «st is not defined» ВСЕГДА. Ошибку глотал
+    // потолок ожидания, план получал пустые выплаты и писал, что биржа не
+    // ответила, — при полностью доступной бирже.
+    const st = await store.getState();
     const known = (await store.getMeta('uidTickers')) || {};
     const book = await withLimit(store.tiPortfolio(token, account, known), 12, null);
     if (book) {
@@ -9160,8 +9259,9 @@ async function openPlan() {
   const st = await store.getState();
   // Потолок жёсткий: лучше план без биржевых довесков через десять секунд,
   // чем полный через минуту — «Считаю…» дольше этого читается как «зависло».
+  const flowWhy = {};
   const flow = await withLimit(portfolioFacts(), 10,
-    { rows: [], dividends: [], totalNet: 0, yieldOnPortfolio: 0, monthly: 0 });
+    { rows: [], dividends: [], totalNet: 0, yieldOnPortfolio: 0, monthly: 0 }, flowWhy);
   const market = await withLimit(store.marketContext(), 4, {}) || {};
 
   const plan = store.rebalancePlan(st, flow, market);
@@ -9171,15 +9271,25 @@ async function openPlan() {
       ${plan.length
         ? 'Всё ниже посчитано из твоих долей, выплат и ставки. Приложение не знает, что вырастет, — поэтому советует только то, что можно проверить.'
         : 'Доли по классам в норме, перекосов нет. Продолжай регулярные пополнения — это и есть план.'}
-      ${!flow.rows.length ? `<br><br><b style="color:var(--warn)">Биржа не ответила</b> — советы посчитаны только по долям, без купонов и дивидендов. `
-        + (openedLocally()
+      ${!flow.rows.length ? `<br><br><b style="color:var(--warn)">${
+          flowWhy.reason === 'error' ? 'Биржа ответила отказом' : 'Купоны и дивиденды не успели прийти'
+        }</b> — советы посчитаны только по долям, без купонов и дивидендов. `
+        + (flowWhy.reason === 'error'
+          // Отказ — это ответ, и его текст надо показать: гадать не о чем.
+          ? `Биржа ответила за доли секунды, но отказом: ${
+              esc((flowWhy.error && (flowWhy.error.message || String(flowWhy.error))) || 'причина не названа')}. `
+            + 'Обнови ещё раз; если повторится — покажи это разработчику.'
+          : openedLocally()
           // Файл с устройства — тогда причина почти всегда в этом.
           ? 'Обычно так бывает, когда файл открыт прямо с устройства.'
           // Открыто по ссылке — прежняя подсказка была прямой неправдой:
           // человек читал «файл открыт с устройства», глядя на адресную
           // строку с сайтом. Виновата задержка биржи, а не способ запуска.
-          : 'Страница открыта по ссылке, так что дело не в способе запуска: биржа не ответила вовремя. '
-            + 'Обнови ещё раз или загляни в «Ещё» → «Диагностика» → «Проверить доступ к бирже».') : ''}
+          // И «не ответила» тоже неправда: потолок в десять секунд стоит на
+          // обход ВСЕХ бумаг сразу, каждая из которых отвечает быстро.
+          : 'Страница открыта по ссылке, так что дело не в способе запуска. Десять секунд — '
+            + 'потолок на опрос всех бумаг сразу, а не на один запрос. Обнови ещё раз или загляни '
+            + 'в «Ещё» → «Диагностика» → «Проверить доступ к бирже».') : ''}
       ${(() => {
         const at = st.settings.tiSyncedAt || st.settings.lastPriceUpdate;
         if (!at) return '';
@@ -9251,11 +9361,11 @@ async function openPlan() {
         ${cp.steps.map(t => `<p style="margin:6px 0">${money(t.amount)} → <b>${
           t.name ? esc(t.name) : `${clsName[t.cls]}: нужна новая бумага`}</b>${
           t.lots != null ? (t.lots > 0
-            ? ` — ${t.lots} шт по ${t.price} ₽${t.lotSize > 1 ? ` (${t.wholeLots} ${t.wholeLots === 1 ? 'лот' : t.wholeLots < 5 ? 'лота' : 'лотов'} по ${t.lotSize})` : ''}${
+            ? ` — ${t.lots} шт по ${dec(t.price)} ₽${t.lotSize > 1 ? ` (${t.wholeLots} ${t.wholeLots === 1 ? 'лот' : t.wholeLots < 5 ? 'лота' : 'лотов'} по ${t.lotSize})` : ''}${
                 t.leftover > 50 ? `, останется ${money(t.leftover)}` : ''}`
             : ` <span style="color:var(--warn)">— ${t.lotSize > 1 ? `лот из ${t.lotSize} шт` : 'одна штука'} дороже этой части взноса, копи или измени деление</span>`) : ''}${
           t.blockReason ? `<br><span class="muted">${esc(t.blockReason)}</span>` : ''}</p>`).join('')}
-        <p class="muted" style="margin-top:8px">Деление — по степени недобора до целевых долей: класс, отстающий сильнее, получает больше. Внутри класса названа бумага с наибольшей фактической доходностью из уже имеющихся.</p>
+        <p class="muted" style="margin-top:8px">Деление — по недобору до целевых долей, посчитанному от суммы ПОСЛЕ взноса: класс, отстающий сильнее, получает больше. Поэтому класс, сегодня стоящий чуть выше цели, всё равно получает часть — иначе сам взнос сдвинул бы его долю вниз. Внутри класса названа бумага с наибольшей фактической доходностью из уже имеющихся.</p>
       </div>`;
     })()}
 
@@ -9377,7 +9487,13 @@ async function openPlan() {
     if (!box) return;
     try {
       const why = {};
-      const r = await withLimit(store.findReplacements(), 60, null, why);
+      // Одна величина на оба ограничения. Срок внутри поиска чуть короче
+      // потолка снаружи: поиск должен успеть вернуть собранное сам, а не
+      // быть срезанным гонкой вместе с ним.
+      const budget = 60;
+      const r = await withLimit(
+        store.findReplacements({ deadline: Date.now() + (budget - 8) * 1000 }),
+        budget, null, why);
       if (!r) {
         box.innerHTML = marketFailureNote(why, store.lastMarketStage('swaps'),
           'Сравнение с рынком сейчас недоступно.',
@@ -9385,7 +9501,15 @@ async function openPlan() {
           + 'появится, как только биржа станет доступна.');
         return;
       }
-      box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked });
+      box.innerHTML = renderIdeas({ swaps: r.ideas, checked: r.checked })
+        // Половина сравнения — не полное сравнение, и об этом надо сказать
+        // прямо здесь, а не оставлять человека думать, что рынок проверен
+        // целиком и замен просто нет.
+        + ((r.missed && r.missed.length)
+          ? `<div class="muted" style="margin-top:10px;line-height:1.6">Проверено не всё: ${
+              r.missed.map(m => `${esc(m.what)} сравнить не удалось${m.why ? ` (${esc(m.why)})` : ''}`).join(', ')
+            }. Остальное сравнено с рынком как обычно; обнови ещё раз, чтобы дособрать.</div>`
+          : '');
       bindIdeaButtons();
 
       // Вердикт составлен до ответа биржи. Появилась выгодная замена —
@@ -9440,7 +9564,7 @@ async function openKeyRate() {
       если браузер не пустит запрос на чужой сайт, впиши её сюда — это займёт десять секунд,
       а меняется она несколько раз в год.</p>
 
-    ${k ? `<div class="diff">Сейчас: <b>${(k.rate * 100).toFixed(2)}%</b> от ${k.date.split('-').reverse().join('.')}
+    ${k ? `<div class="diff">Сейчас: <b>${dec((k.rate * 100).toFixed(2))}%</b> от ${k.date.split('-').reverse().join('.')}
       · ${k.source === 'ЦБ' ? 'получена от ЦБ' : 'вписана вручную'}</div>` : ''}
 
     <label>Ключевая ставка, %</label>
@@ -9478,7 +9602,7 @@ async function openKeyRate() {
     out.innerHTML = '<div class="muted" style="margin-top:10px">Спрашиваю Банк России…</div>';
     const r = await withLimit(store.refreshKeyRate(), 12, null);
     out.innerHTML = r && r.source === 'ЦБ'
-      ? `<div class="muted" style="margin-top:10px">Получено от ЦБ: <b>${(r.rate * 100).toFixed(2)}%</b> от ${r.date}.</div>`
+      ? `<div class="muted" style="margin-top:10px">Получено от ЦБ: <b>${dec((r.rate * 100).toFixed(2))}%</b> от ${r.date}.</div>`
       : `<div class="muted" style="margin-top:10px">Банк России не ответил странице — это ограничение браузера,
          а не сбой ставки. Впиши значение вручную: оно сохранится и будет использоваться в расчётах.</div>`;
   };
@@ -9570,6 +9694,11 @@ function openWhatsNew() {
     <p class="muted" style="margin:0 0 10px">Главное из сборок 30 июля, 3 и 6 августа. Отметка сборки внизу главной
       обязана совпадать с именем скачанного файла — иначе открылся старый.</p>
     ${item('Поиск по рынку перестал обходить защиту стороной', 'Раздел «что подходит портфелю» ищет тот класс, которого не хватает сильнее всего. Защита в этом сравнении не участвовала вовсе: её доля не попадала в расчёт, разность выходила нечислом, а любое сравнение с нечислом ложно. Выбор поэтому всегда падал на акции или облигации — даже когда золота 5% при цели 10% и не хватало именно его. Заготовленный текст «искал защиту: фонды на золото» лежал в коде мёртвым и не показывался ни разу.')}
+    ${item('Числа с десятой пишутся по-русски', 'Правило было заведено для процентов, но мимо него остались сроки, месяцы и секунды: на одном экране стояло «резерва на 1.0 мес» рядом с «10,8%», а в диагностике — «ответ за 0.4 с». Теперь запись одна на все величины: целое без хвоста, десятая через запятую. Проверка следит, чтобы новых точек не завелось.')}
+    ${item('Взнос больше не спорит с карточкой долей', 'На «Портфеле» акции стояли выше цели — 65,9% из 65%, — а план тут же отдавал им бо́льшую часть взноса. Арифметика была верной: недобор считается от суммы ПОСЛЕ пополнения, и класс, стоящий у цели сегодня, всё равно должен получить часть, иначе сам взнос сдвинет его долю вниз. Не было сказано главного — от какой суммы идёт счёт. Теперь сказано.')}
+    ${item('Скрытые ошибки перестали быть скрытыми', 'Три последние найденные поломки — вызов функции из чужого модуля, чтение переменной, которой нет, и нажатие вместо числа — жили за пойманным и никому не показанным исключением. Приложение выглядело работающим и объясняло происходящее неправильно. Глотать ошибки местами приходится: одна не пришедшая история выплат не повод рушить экран. Глотать молча — нет. Теперь всё пойманное и не показанное попадает в список: место, текст, число повторов. Смотреть его в «Ещё» → «Диагностика», в самом низу. Пусто там — хороший знак; если экран ведёт себя странно, причина, скорее всего, лежит именно в этом списке.')}\n    ${item('Экраны и листы проверяются на четырнадцати краевых счетах', 'К пяти краевым случаям добавились ещё девять: обнулившиеся цены, достигнутая цель, нулевой срок цели, счёт из одной защиты, незаданная цель, нулевой взнос, продано больше купленного. На каждом открываются и листы, и все четыре экрана — причём состояние берётся так же, как его берёт сама отрисовка, а не собирается руками: иначе проверялась бы выдумка. Кроме пустых значений и нечисел теперь ловится и бесконечность — её даёт деление на ноль, и в вёрстку она попадает молча.')}\n    ${item('Пустой счёт больше не роняет проверку на обвал', 'Лист брал самую просевшую и самую устойчивую бумагу первой и последней строкой списка — а если бумаг нет вовсе, списка тоже нет, и лист падал целиком: вместо ответа человек видел ошибку запуска. Такое бывает у каждого дважды: когда счёт только открыт и когда всё продано. Теперь в этом случае сказано прямо — падать нечему, деньги на счёте рынок не двигает. Заодно листы стали проверяться на пяти краевых портфелях: пустой счёт, одни деньги, бумага без известной цены, позиция, проданная в ноль, и незаданные расходы.')}\n    ${item('Заголовки месяцев в журнале встали в правильный падеж', 'Над лентой стояло «ИЮНЯ 2026» — обрывок фразы «16 июня», а не заголовок. Список названий был один на два разных случая: в дате месяц отвечает на вопрос «когда» и стоит в родительном, а заголовок группы — это название месяца само по себе, именительный. Теперь списка два, и проверка отрисованного журнала не пропустит возврат.')}\n    ${item('Опечатка в имени метода больше не доживёт до экрана', 'Соседний класс к «имени, которого нет»: вызов несуществующего метода падает с «это не функция», а потолок ожидания такую ошибку глотает — и снова получается «биржа не ответила» при исправной бирже. Теперь проверка собирает все списки экспорта модулей и сверяет с ними каждый вызов через store, moex и остальные псевдонимы. Заодно расширена проверка областей видимости: она смотрит и на стрелочные помощники, а не только на объявления функций.')}\n    ${item('Сравнение двух бумаг падало при каждом нажатии', 'Расчёт сравнения читал настройки из переменной, которой в нём нет, — ровно та же ошибка, что и в разборе выплат, только в другом месте. Обработчик кнопки исключений не ловит, поэтому лист просто замирал без единого слова. Теперь настройки приходят доводом. И появилась проверка, считающая область видимости КАЖДОЙ функции отдельно: прежняя смотрела, объявлено ли имя где-то в файле, а такие ошибки и живут там, где имя объявлено во множестве соседних функций, но не в этой.')}\n    ${item('Ставки перестали спорить с остальными числами', 'Правило про запятую стерегло десятые, но не сотые: ключевая ставка и купонная ставка печатались с точкой рядом с долями, где стоит запятая. Переведены и они, а правило расширено — теперь оно смотрит и на сотые, а не только на десятые.')}\n    ${item('Скрытые ошибки стали сетью, а не просто списком', 'Приложение давно записывает ошибки, которые проглотил потолок ожидания, и показывает их в диагностике. Теперь на этот список смотрит и стенд: он открывает все листы подряд и валит сборку, если среди проглоченного оказалась ошибка кода — обращение к тому, чего нет. От сети такие ошибки не зависят, значит списывать их на биржу нельзя. Обе поломки этой недели ловятся этой сетью автоматически.')}\n    ${item('Купоны и дивиденды не приходили из-за опечатки', 'Разбор выплат по портфелю читал состояние приложения из переменной, которой в этой функции нет и не было. При подключённом брокере вызов падал сразу же — всегда. Ошибку глотал потолок ожидания, план получал пустые выплаты и писал, что биржа не ответила, — при полностью доступной бирже. Тот же разбор кормит и карточку «Сколько приносит портфель». Ошибку нашла новая проверка листов: в браузере она пряталась за проглоченным исключением, а на стенде видна сразу.')}\n    ${item('Запрос к бирже теперь один, а не две копии', 'Тело запроса и запасного пути к нему лежали в файле дважды — в слое биржи и в слое фактов о бумагах. Проверка стерегла их побайтовое совпадение, но чинить две одинаковые функции руками — способ однажды ошибиться: правку внесут в одну, а во вторую скопируют с опечаткой. Теперь тело одно, остальные модули получают его через связывание, а проверка требует единственности. Заодно появилась проверка самого поведения: обрыв связи со страницы и обрыв из файла, открытого с устройства, — разные причины, и человеку говорится именно та, что случилась.')}\n    ${item('Листы проверяются так же, как экраны', 'Обход четырёх экранов ловил пустые значения и нечисла в вёрстке, но до листов не доставал — оттуда и вылез обвал рынка, посчитанный от нажатия. Теперь проверка открывает подряд план, итоги, правила, обвал, справочник инструментов, «Что нового» и размещение — на одном живоподобном портфеле и при молчащей бирже, — и не пропускает ни утечки, ни цены с точкой.')}\n    ${item('Потолки ожидания перестали спорить с арифметикой', 'На весь обход рынка стояло 60 секунд, а сумма внутренних потолков — доска ОФЗ, доска акций, истории выплат — выходила больше сотни. Обход мог не уложиться в срок, даже когда каждый ответ приходил за доли секунды, и снаружи его срезало вместе со всем собранным. Теперь поиск сам смотрит на часы: не хватает времени на класс — он его не начинает и помечает непроверенным. Срок внутри и потолок снаружи считаются из одной величины, разойтись им больше негде. Отдельно починен запасной путь запроса: при отказе он получал полный отсчёт заново, и запрос с заявленными двадцатью секундами занимал сорок; теперь ему достаётся остаток.')}\n    ${item('Половина сравнения лучше пустого раздела', 'Сравнение с рынком шло одним куском: доска ОФЗ уже собрана, доска акций упала — и раздел «Что можно поменять» оставался пустым целиком, будто биржа не отвечала вовсе. Теперь классы собираются порознь: что удалось — показывается, а под списком прямо написано, какую половину проверить не вышло и почему. Кандидаты класса попадают в список только целиком: иначе вышло бы худшее — фонды денежного рынка в кандидатах, а доходности своих облигаций не пришли, и приложение предложило бы обменять бумагу, о которой ничего не знает.')}\n    ${item('Цены пишутся по-русски, как и проценты', 'Правило про запятую было заведено для процентов и сроков, а цены остались сырым числом: на одном экране доля бумаги стояла с запятой, а цена рядом — с точкой. Разделитель теперь один во всём приложении — в портфеле, журнале, разборе бумаги, плане взноса и сверке с брокером. Знаки не округляются: у фондов цена вида 2,8045 ₽, и последний знак там не украшение. Проверка обходит все четыре экрана и не пропускает рубль с точкой.')}
+    ${item('Разбор облигаций падал на каждой бумаге', 'Тип купона ОФЗ читается из номера серии — но функция чтения живёт в ядре, а зовут её из модуля биржи, и модули друг друга не видят. Разбор ЛЮБОЙ облигации падал с «ofzKind is not defined», доска ОФЗ не собиралась, а наружу это выходило как «биржа не ответила за 60 секунд»: доска нужна и покупкам, и заменам. Проверка теперь читает файл целиком и ловит такой вызов между любыми двумя модулями, а не только на границе с интерфейсом.')}
+    ${item('Лист обвала считался от нажатия, а не от процента', 'Кнопка обвала была повешена на функцию с доводом напрямую. Браузер зовёт обработчик С СОБЫТИЕМ мыши — оно и занимало место глубины падения, значение по умолчанию не срабатывало, и весь лист считался от объекта события: в заголовке стояло нечисло, в потерях — «не число ₽», у худшей и лучшей бумаги вместо процентов пусто́е. Теперь довод проверяется на входе, а проверка следит, чтобы ни один обработчик кнопки не принимал доводов.')}
     ${item('«Биржа не ответила» больше не выдумывает молчание', 'Раздел писал «биржа не ответила за 60 секунд», а диагностика в ту же минуту получала ответ за 0,2 с. Оба были правы: потолок ожидания подменял результат одинаково и когда время вышло, и когда биржа ответила отказом, а надпись знала только про молчание. Теперь три случая различаются: биржи не видно вовсе, биржа ответила отказом (текст отказа показан) и поиск не уложился в срок. И сказано главное: потолок стоит на весь обход рынка — доски акций и ОФЗ, список фондов, по одной истории выплат на бумагу, — а не на один запрос. Быстрая биржа и долгий обход противоречат друг другу только на вид.')}
     ${item('«Не дождался» называет свой шаг, а не соседний', 'Идеи и замены ищутся одновременно, а отметка шага была одна на двоих. Успевший первым сбрасывал её в ноль, и второй по своему отказу называл чужой шаг — или не называл никакого. Теперь отметка у каждого поиска своя.')}
     ${item('Биржу больше не спрашивают об одном дважды', 'Список акций нужен и разделу «что подходит портфелю», и «что можно поменять» — каждый качал его сам. На медленной сети выходило нелепое: идеи загрузились, а замены рядом написали «не дождался: список акций». Теперь ответ биржи живёт две минуты и достаётся обоим. То же с историями выплат — их запрашивается по одной на каждую бумагу рынка, и половина повторялась: теперь они живут полчаса, а одновременные вопросы об одной бумаге склеиваются в один запрос. Историю выплат качали две разные функции — теперь обе ходят одним путём. Проверка доступности биржи тоже помнит ответ полминуты: раньше она уходила в сеть перед каждым разбором.')}
@@ -9809,7 +9938,7 @@ async function openSwapPlan(index) {
       В момент сделки цена будет другой, поэтому ниже названы границы, за которыми обмен перестаёт окупаться.</p>
 
     ${step(1, `Продать ${plan.sellQty} шт ${esc(plan.fromName)}`,
-      `Лимитная заявка, цена <b>не ниже ${plan.minSell.toFixed(2)} ₽</b> (сейчас ${plan.sellPrice.toFixed(2)} ₽).
+      `Лимитная заявка, цена <b>не ниже ${dec(plan.minSell.toFixed(2))} ₽</b> (сейчас ${dec(plan.sellPrice.toFixed(2))} ₽).
        Ниже этой границы теряется больше, чем даёт обмен за год.
        Выручка после комиссии — примерно <b>${money(plan.proceeds)}</b>.`)}
 
@@ -9819,7 +9948,7 @@ async function openSwapPlan(index) {
            Возьми в приложении брокера цену ${esc(plan.to)} и купи на <b>${money(plan.proceeds)}</b> —
            лимитной заявкой, не выше цены в стакане.`)
       : step(2, `Купить ${plan.buyQty} шт ${esc(plan.toName)}`,
-          `Лимитная заявка, цена <b>не выше ${plan.maxBuy.toFixed(2)} ₽</b> (сейчас ${plan.buyPrice.toFixed(2)} ₽).
+          `Лимитная заявка, цена <b>не выше ${dec(plan.maxBuy.toFixed(2))} ₽</b> (сейчас ${dec(plan.buyPrice.toFixed(2))} ₽).
            На это уйдёт около <b>${money(plan.spent)}</b>${plan.buyLot > 1 ? ` (${plan.lots} лот. по ${plan.buyLot})` : ''},
            останется <b>${money(plan.leftover)}</b> — их можно добавить к следующему взносу.`)}
 
@@ -9985,8 +10114,24 @@ function classOf(p) {
 }
 
 async function openCrashTest(drop = -0.30) {
+  // Значение по умолчанию НЕ спасает, если функцию повесить обработчиком
+  // напрямую: браузер зовёт её с событием мыши, довод оказывается занят
+  // объектом, и весь лист считался от него — «упадёт на NaN%», «потеря не
+  // число ₽». Довод, пришедший снаружи, обязан быть проверен здесь.
+  if (typeof drop !== 'number' || !Number.isFinite(drop) || drop >= 0) drop = -0.30;
   const r = await store.crashTest(drop);
   const worst = r.items[0], best = r.items[r.items.length - 1];
+  // Бумаг может не быть вовсе — счёт только открыли или всё продано. Тогда
+  // «сильнее всех просядет» не о чем: раньше строка ниже читала свойство у
+  // пустоты, лист падал целиком, и вместо ответа человек видел ошибку
+  // запуска. Проверка устойчивости пустого портфеля — это «падать нечему».
+  if (!worst || !best) {
+    openSheet(`<h2 style="margin:0 0 6px;font-size:19px">Если рынок упадёт на ${Math.abs(drop * 100)}%</h2>
+      <p class="muted" style="line-height:1.6">Бумаг на счёте пока нет, поэтому падать нечему:
+        деньги на счёте рынок не двигает. Проверка станет осмысленной, как только появится
+        первая покупка.</p>`);
+    return;
+  }
 
   openSheet(`<h2 style="margin:0 0 6px;font-size:19px">Если рынок упадёт на ${Math.abs(drop * 100)}%</h2>
     <p class="muted" style="margin:0 0 14px">Это не прогноз, а проверка устойчивости: разные бумаги
@@ -10008,9 +10153,9 @@ async function openCrashTest(drop = -0.30) {
 
     ${r.reserveMonths != null ? `<div class="diff" style="margin-top:10px">
       <b>Сможешь ли переждать:</b> ${r.canWait
-        ? `<span style="color:var(--ok)">да</span> — резерва хватит на ${r.reserveMonths.toFixed(1)} мес,
+        ? `<span style="color:var(--ok)">да</span> — резерва хватит на ${dec1(r.reserveMonths)} мес,
            продавать в убыток не придётся`
-        : `<span style="color:var(--warn)">рискованно</span> — резерва на ${r.reserveMonths.toFixed(1)} мес.
+        : `<span style="color:var(--warn)">рискованно</span> — резерва на ${dec1(r.reserveMonths)} мес.
            Если в такой момент понадобятся деньги, придётся продавать по низким ценам и фиксировать убыток`}</div>` : ''}
 
     <div class="row" style="margin-top:14px">
@@ -10107,7 +10252,7 @@ async function openOperation(id) {
     <p class="muted" style="margin:0 0 14px">${o.date}${o.note ? ' · ' + esc(o.note) : ''}</p>
     <div class="diff">Сумма: <b>${money(o.amount)}</b></div>
     ${o.ticker ? `<div class="diff">Бумага: <b>${esc(o.ticker)}</b></div>` : ''}
-    ${o.qty ? `<div class="diff">${o.qty} шт по ${o.price} ₽${o.fee ? ' · комиссия ' + o.fee + ' ₽' : ''}</div>` : ''}
+    ${o.qty ? `<div class="diff">${o.qty} шт по ${dec(o.price)} ₽${o.fee ? ' · комиссия ' + dec(o.fee) + ' ₽' : ''}</div>` : ''}
     <div style="height:14px"></div>
     ${o.technical ? `<div class="diff" style="color:var(--dim)">Служебная операция: создана при сверке,
       чтобы восстановить портфель. В налоговый вычет не засчитывается — реальным взносом она не была.</div>` : ''}
@@ -10144,8 +10289,8 @@ async function openSecurity(ticker) {
     facts = `
       <div class="diff">Купон <b>${f.couponValue} ₽</b> ${f.couponsPerYear} раза в год — это <b>${money(f.annualCoupon)}</b> с бумаги в год</div>
       <div class="diff">С твоих ${p.qty} шт: <b style="color:var(--ok)">${money(f.netYearly)}</b> в год чистыми после налога</div>
-      ${f.maturity ? `<div class="diff">Погашение <b>${f.maturity.split('-').reverse().join('.')}</b> — через ${f.yearsLeft.toFixed(1)} лет государство вернёт номинал ${f.faceValue} ₽ за штуку</div>` : ''}
-      ${f.ytm ? `<div class="diff">Доходность к погашению <b style="color:var(--ok)">${pct(f.ytm)}</b> годовых — выше купонной ставки ${(f.couponRate * 100).toFixed(2)}%, потому что купил ниже номинала</div>` : ''}
+      ${f.maturity ? `<div class="diff">Погашение <b>${f.maturity.split('-').reverse().join('.')}</b> — через ${dec1(f.yearsLeft)} лет государство вернёт номинал ${f.faceValue} ₽ за штуку</div>` : ''}
+      ${f.ytm ? `<div class="diff">Доходность к погашению <b style="color:var(--ok)">${pct(f.ytm)}</b> годовых — выше купонной ставки ${dec((f.couponRate * 100).toFixed(2))}%, потому что купил ниже номинала</div>` : ''}
       <div class="muted" style="margin-top:12px">Купон — обязательство государства: размер и даты известны заранее, отменить нельзя. Это самый предсказуемый доход в портфеле.</div>`;
   } else if (f.kind === 'stock' && f.known && f.payments.length) {
     facts = `
@@ -10161,7 +10306,7 @@ async function openSecurity(ticker) {
   }
 
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">${esc(p.name)}</h2>
-    <p class="muted" style="margin:0 0 14px">${p.qty} шт · средняя ${p.avgPrice} ₽ · сейчас ${p.price} ₽${p.priceIsMarket ? '' : ' (цена покупки)'}</p>
+    <p class="muted" style="margin:0 0 14px">${p.qty} шт · средняя ${dec(p.avgPrice)} ₽ · сейчас ${dec(p.price)} ₽${p.priceIsMarket ? '' : ' (цена покупки)'}</p>
     ${st0.costIsApproximate ? `<div class="diff" style="color:var(--warn)">
       Цена покупки неизвестна — прибыль по этой бумаге не считается.
       Посмотри среднюю в приложении брокера и впиши.</div>
@@ -10257,7 +10402,8 @@ async function openSecurity(ticker) {
 
     const opt = (ff, pp) => ({ ticker: pp.ticker, name: pp.name, kind: ff.kind,
       price: pp.price, annualCoupon: ff.annualCoupon, ttm: ff.ttm });
-    const cr = compare(opt(f, p), opt(f2, p2), amount);
+    const cs = await store.getState();
+    const cr = compare(opt(f, p), opt(f2, p2), amount, cs.settings);
 
     if (cr.a.incomePerYear === 0 && cr.b.incomePerYear === 0) {
       out.innerHTML = `<div class="diff">Ни одна из двух не платит ни купонов, ни дивидендов —
@@ -10416,7 +10562,7 @@ async function openReport(kind = 'broker') {
           ${cash.length ? ' · и ' + cash.length + ' операц. с деньгами' : ''}</div>
         ${asTrades.trades.slice(0, 6).map(t => `<div class="diff">
           <span class="muted">${t.date.split('-').reverse().join('.')}</span>
-          ${t.type === 'buy' ? 'куплено' : 'продано'} <b>${esc(t.ticker)}</b> ${t.qty} шт по ${t.price} ₽</div>`).join('')}
+          ${t.type === 'buy' ? 'куплено' : 'продано'} <b>${esc(t.ticker)}</b> ${t.qty} шт по ${dec(t.price)} ₽</div>`).join('')}
         ${asTrades.trades.length > 6 ? `<div class="muted">…и ещё ${asTrades.trades.length - 6}</div>` : ''}
         <div class="muted" style="margin-top:10px">Из сделок восстановятся точные средние цены и честная доходность.
           Повторная загрузка того же отчёта дублей не создаст.</div>
