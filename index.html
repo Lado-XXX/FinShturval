@@ -16,7 +16,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Штурвал">
 <meta name="description" content="Портфель на ИИС: что происходит, что стоит сделать и почему.">
-<title>Штурвал · 2026-08-06t</title>
+<title>Штурвал · 2026-08-09k</title>
 
 <style>
 :root{
@@ -146,7 +146,7 @@ textarea:focus-visible,.nav button:focus-visible,[data-idea]:focus-visible{
 
 <script>
 const SH = {};
-const BUILD_ID = '2026-08-06t';   // сменился — журнал пересобирается начисто
+const BUILD_ID = '2026-08-09k';   // сменился — журнал пересобирается начисто
 var db = SH;
 var reports = SH;
 var store = SH;
@@ -309,6 +309,24 @@ function noteSwallowed(where, err) {
 }
 function swallowedErrors() { return swallowedLog.slice().reverse(); }
 
+/**
+ * Месяц, месяца, месяцев — по числу перед словом. Правило русское и от
+ * величины не линейное: смотреть надо на последнюю цифру, а у чисел от 11
+ * до 14 — на предпоследнюю. Раньше стояло сравнение по величине, и ровно
+ * один месяц выходил «1 месяца»: цифра верная, фраза неграмотная.
+ *
+ * Дробное всегда «месяца»: «1,5 месяца», «2,5 месяца» — так и говорят.
+ */
+function monthWord(v) {
+  const n = Number(v) || 0;
+  if (!Number.isInteger(n)) return 'месяца';
+  const abs = Math.abs(n), last = abs % 10, two = abs % 100;
+  if (two >= 11 && two <= 14) return 'месяцев';
+  if (last === 1) return 'месяц';
+  if (last >= 2 && last <= 4) return 'месяца';
+  return 'месяцев';
+}
+
 const dec = v => {
   const n = Number(v);
   if (!Number.isFinite(n)) return '';
@@ -351,12 +369,106 @@ const dec1 = v => {
  * `meta.inflation > 0 ? ... : 0.08` в другом — при отрицательном вводе
  * первое приняло бы минус, второе нет. Одно допущение — одна проверка.
  */
-const ASSUMED = {
+/**
+ * ПОЛИТИКА — ВСЕ ПОРОГИ ПРИЛОЖЕНИЯ В ОДНОМ МЕСТЕ.
+ *
+ * Числа, по которым приложение судит о портфеле, лежали в четырёх наборах:
+ * `LIMITS` в советнике, `ASSUMED` здесь, `PAYOUT_AGE` рядом, ставка налога
+ * отдельно. Пока они не пересекались, это сходило с рук. Но стоит одному и
+ * тому же порогу появиться в двух местах — и карточки начинают спорить
+ * друг с другом, а найти, где правится число, становится негде.
+ *
+ * Поэтому здесь ОДИН объект, а прежние имена — не копии, а ссылки на него.
+ * Никакое число не должно быть записано дважды.
+ */
+const POLICY = {
+  // Допущения о рынке, когда точных данных нет
   inflation: 0.08,     // сколько дорожает жизнь за год; правится в настройках
   moneyRate: 0.16,     // ставка по деньгам, когда биржа не ответила
   marketYield: 0.08,   // средняя дивдоходность рынка, пока не посчитана
-  crashDrop: -0.30     // сценарий обвала для проверки на прочность
+  crashDrop: -0.30,    // сценарий обвала для проверки на прочность
+
+  // Границы разумного состава портфеля
+  singlePosition: 0.25,   // максимум в одной бумаге
+  sectorMax: 0.35,        // максимум в одном секторе
+  reserveMonths: 3,       // подушка в месяцах расходов
+  rebalanceAbs: 0.05,     // правило 5/25: абсолютное отклонение
+  rebalanceRel: 0.25,     // относительное отклонение
+  hedgeMin: 0.10,         // минимум защитных активов
+  bondsMin: 0.20,         // разумный коридор облигаций
+  bondsMax: 0.40,
+  cashMinMonths: 1,       // денег на счёте хотя бы на месяц расходов
+
+  // Свежесть выплат
+  payout: { fresh: 300, stopped: 400 },
+
+  ndfl: 0.13,
+
+  // Границы риск-индекса: до первой — норма, до второй — повышенный
+  riskOk: 3.5,
+  riskWarn: 6.5,
+
+  // СТРЕСС-СЦЕНАРИИ. Часть величин — не факты, а объявленные допущения:
+  // как акции реагируют на ставку и на курс, точно не знает никто, поэтому
+  // числа названы здесь и подписаны на экране словом «допущение». Прятать
+  // их внутри расчёта значило бы выдавать догадку за измерение.
+  stress: {
+    fxDrop: 0.20,          // рубль теряет пятую часть стоимости
+    rateStep: 0.03,        // ключевая ставка растёт на три пункта
+    divCut: 0.50,          // выплаты урезаны вдвое
+    rateStockBeta: 1.5,    // допущение: акции теряют 1,5% на каждый пункт ставки
+    bondDuration: 4,       // если срок до погашения бумаги неизвестен
+    ratePoint: 0.01        // один пункт ставки — мера чувствительности облигации
+  },
+
+  // Шаг, на котором показывается чувствительность: «на сколько изменится
+  // цена, если ставка или курс сдвинутся на один пункт». Один пункт удобен
+  // тем, что его легко умножить в уме на любое ожидаемое движение.
+  sensitivityStep: 0.01,
+  // Насколько класс должен недобирать до цели, чтобы это стоило докупки.
+  // Меньше — шум перестановок: доли гуляют сами от движения цен.
+  classGapWorth: 0.02,
+  // Запас до предела, ниже которого докупать уже не советуем.
+  headroomShare: 0.8,
+
+  // Насколько риск должен вырасти, чтобы это считалось ростом, а не шумом
+  // округления. Ниже этого — совет не отбрасывается: отказывать из-за сотых
+  // долей значило бы запретить почти любую покупку.
+  riskNoise: 0.05,
+
+  // Словесная шкала вероятности. Проценты вида «48,37%» — ложная точность:
+  // модель случайная, и третий знак в ней — шум, а выглядит как знание.
+  chanceLow: 0.20,
+  chanceMid: 0.50,
+  chanceHigh: 0.80
 };
+
+/** Вероятность словами, а не числом. @param {number} chance 0..1 */
+function chanceWord(chance) {
+  if (chance == null || !Number.isFinite(chance)) return null;
+  if (chance < POLICY.chanceLow) return 'низкая';
+  if (chance < POLICY.chanceMid) return 'средняя';
+  if (chance < POLICY.chanceHigh) return 'высокая';
+  return 'очень высокая';
+}
+
+/**
+ * Грубая сумма для прогноза: «2,1 млн ₽» вместо «2 148 273 ₽».
+ * Точность до рубля в предсказании на пять лет — обман: она сообщает
+ * уверенность, которой нет ни у одной модели.
+ */
+function roughMoney(v) {
+  const n = Math.abs(Number(v) || 0);
+  if (n >= 1e6) return `${dec1(n / 1e6)} млн ₽`;
+  if (n >= 1e5) return `${Math.round(n / 1e3)} тыс ₽`;
+  // Своя запись, а не общая: `money` живёт в других модулях, а они закрыты.
+  // Голое имя отсюда не видно — и на суммах меньше ста тысяч это падало.
+  return `${(Math.round(n / 1e3) * 1e3).toLocaleString('ru-RU')} ₽`;
+}
+
+// Прежние имена — ссылки, а не копии. Ключи совпадают намеренно: так число
+// остаётся ровно одно, а весь прежний код продолжает работать.
+const ASSUMED = POLICY;
 /** Разумная доля из настроек или допущение. Ноль и минус — не настройка. */
 function share(value, fallback) {
   const r = Number(value);
@@ -381,7 +493,7 @@ const moneyRate = value => share(value, ASSUMED.moneyRate);
  *   такая бумага не идёт, а в списке помечается. Годовой плательщик
  *   сдвигает реестр на месяц-полтора, поэтому не 365, а 400.
  */
-const PAYOUT_AGE = { fresh: 300, stopped: 400 };
+const PAYOUT_AGE = POLICY.payout;
 
 /**
  * СТАВКА НАЛОГА — ОДНА НА ВСЁ ПРИЛОЖЕНИЕ.
@@ -392,7 +504,7 @@ const PAYOUT_AGE = { fresh: 300, stopped: 400 };
  * по одной ставке, а выгода обмена по другой. Ровно так и рождаются
  * карточки, спорящие друг с другом.
  */
-const NDFL_DEFAULT = 0.13;
+const NDFL_DEFAULT = POLICY.ndfl;
 function ndflRate(settings) {
   const r = Number(settings && settings.ndflRate);
   return r > 0 && r < 1 ? r : NDFL_DEFAULT;
@@ -429,7 +541,7 @@ function sectorOf(asset) {
   return null;
 }
 
-return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, PAYOUT_AGE, ASSUMED, share, inflationRate, moneyRate, parseNumber, pct, dec, dec1, noteSwallowed, swallowedErrors, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
+return {ofzKind, ndflRate, netOfTax, NDFL_DEFAULT, POLICY, chanceWord, roughMoney, PAYOUT_AGE, ASSUMED, share, inflationRate, moneyRate, parseNumber, pct, dec, dec1, monthWord, noteSwallowed, swallowedErrors, KIND, classify, isHedge, isDefensive, allocationClass, positionValue, positionCost, roundPrice, today, daysBetween, sectorOf};
 })());
 
 /* ─── core/operations.js ─── */
@@ -1600,10 +1712,21 @@ function contributionPlan(state, flow = { rows: [] }, amountOpt = null) {
     // (в маленьком портфеле любая покупка — большая доля), берём лучшую из
     // тех, кто хотя бы не перегружен сейчас: иначе портфель не смог бы расти.
     const allowed = byYield.filter(p => notOverYet(p) && okAfter(p));
-    const fallback = byYield.filter(notOverYet);
+    // Если в предел не помещается никто, выбор идёт по НАИМЕНЬШЕМУ вреду, а
+    // не по доходности. Раньше здесь брали лучшую по выплатам — и ею
+    // оказывалась самая крупная позиция: на портфеле в 191 тысячу взнос в
+    // 30 тысяч уводил долю одной бумаги с 23,5% сразу за 33% при пределе в
+    // 25%. Приложение нарушало собственное правило, советуя его соблюдать.
+    const fallback = byYield.filter(notOverYet)
+      .slice()
+      .sort((a, b) => (positionValue(a) + part.sum) - (positionValue(b) + part.sum));
 
     const pick = allowed[0] || fallback[0] || null;
     const blocked = !pick && byYield.length > 0;
+    // Взнос велик для этого портфеля: в предел не влезает никто. Молчать об
+    // этом нельзя — человек вправе знать, что покупка ухудшает состав.
+    const stretched = !allowed.length && !!pick;
+    const afterShare = pick ? (positionValue(pick) + part.sum) / totalAfter : 0;
 
     // Покупают лотами: у Сбера в лоте 10 акций, и «111 штук» купить нельзя.
     // Считаем целые лоты и честно показываем остаток, который не потратится.
@@ -1616,6 +1739,13 @@ function contributionPlan(state, flow = { rows: [] }, amountOpt = null) {
     return { cls: part.cls, amount: Math.round(part.sum),
              ticker: pick ? pick.ticker : null, name: pick ? pick.name : null,
              price: pick ? pick.price : null, lots,
+             stretched,
+             stretchNote: stretched
+               ? `Взнос велик для этого портфеля: ни одна бумага класса не остаётся `
+                 + `в пределе ${pct(LIMITS.singlePosition)} на бумагу. Выбрана та, что нарушает `
+                 + `его меньше всех — её доля станет ${pct(afterShare)}. Дробить покупку на `
+                 + `несколько месяцев или добавить новую бумагу — оба способа лучше.`
+               : null,
              lotSize, wholeLots, leftover: pick ? Math.round(part.sum - spent) : 0,
              // Причина молчания важнее молчания: человек должен понимать,
              // почему бумага не названа.
@@ -1654,15 +1784,836 @@ const STRATEGIES = {
                + 'погашаемые до цели, — ценой доходности около ставки. Акции и золото на таком сроке — лотерея.' }
 };
 
-const LIMITS = {
-  singlePosition: 0.25,   // максимум в одной бумаге
-  sectorMax: 0.35,        // максимум в одном секторе
-  reserveMonths: 3,       // подушка в месяцах расходов
-  rebalanceAbs: 0.05,     // правило 5/25: абсолютное отклонение
-  rebalanceRel: 0.25      // относительное отклонение
-};
+// Те же числа лежали здесь второй копией. Теперь это ссылка на политику:
+// ключи совпадают, число остаётся одно, правится в одном месте. Через SH —
+// модули закрыты друг от друга, голое имя из ядра здесь не видно.
+const LIMITS = SH.POLICY;
 
 const money = v => Math.round(v).toLocaleString('ru-RU') + ' ₽';
+
+/**
+ * РИСК-ИНДЕКС ПОРТФЕЛЯ, 0–10.
+ *
+ * Зачем число, когда есть карточки. Карточки говорят про каждую беду
+ * отдельно: тут концентрация, там нет защиты, здесь пустой резерв. Понять
+ * по ним, стало ли в целом хуже после покупки, невозможно — а именно это и
+ * нужно, чтобы сравнить два решения между собой.
+ *
+ * Пять мер, у каждой своя цена. Штраф растёт от нуля до потолка меры по
+ * мере ухода за границу, а не переключается рывком: портфель с одной
+ * бумагой на 26% и с одной на 60% — разные портфели, и одинаковой оценки
+ * они не заслуживают.
+ *
+ * Числа берутся из политики, а не пишутся здесь: иначе через месяц порог
+ * концентрации в советах и в индексе разойдутся, и приложение начнёт
+ * спорить само с собой.
+ *
+ * @param {object} state - состояние: summary, settings, positions
+ * @returns {{score:number, band:string, checks:Array<object>, top:Array<object>}|null}
+ */
+function riskIndex(state) {
+  const s = state && state.summary;
+  if (!s || !(s.securities > 0)) return null;
+
+  const P = LIMITS;
+  const expenses = Number(state.settings?.monthlyExpenses) || 0;
+  const total = s.securities;
+
+  // Доля меры за границей, приведённая к 0..1. Ноль — норма, единица — вдвое
+  // хуже границы и дальше уже некуда.
+  const over = (value, limit, span) => {
+    if (!(value > limit)) return 0;
+    return Math.min(1, (value - limit) / (span || limit));
+  };
+  const under = (value, limit) => {
+    if (!(limit > 0) || value >= limit) return 0;
+    return Math.min(1, (limit - value) / limit);
+  };
+
+  const shares = s.shares || {};
+  let topTicker = null, topShare = 0;
+  for (const [ticker, share] of Object.entries(shares)) {
+    if (share > topShare) { topShare = share; topTicker = ticker; }
+  }
+  let topSector = null, sectorShare = 0;
+  for (const [name, value] of Object.entries(s.bySector || {})) {
+    const part = value / total;
+    if (part > sectorShare) { sectorShare = part; topSector = name; }
+  }
+  const hedgeShare = (s.byClass?.hedge || 0) / total;
+  const bondsShare = (s.byClass?.bonds || 0) / total;
+  const cashMonths = expenses > 0 ? (s.cash || 0) / expenses : null;
+
+  const checks = [
+    { id: 'position', weight: 2.5, hurt: over(topShare, P.singlePosition, P.singlePosition),
+      title: 'Одна бумага',
+      value: pct(topShare) + (topTicker ? ` — ${topTicker}` : ''), norm: `не больше ${pct(P.singlePosition)}` },
+    { id: 'sector', weight: 2.5, hurt: over(sectorShare, P.sectorMax, P.sectorMax),
+      title: 'Одна отрасль',
+      value: pct(sectorShare) + (topSector ? ` — ${topSector}` : ''), norm: `не больше ${pct(P.sectorMax)}` },
+    { id: 'hedge', weight: 2, hurt: under(hedgeShare, P.hedgeMin),
+      title: 'Защитные активы', value: pct(hedgeShare), norm: `не меньше ${pct(P.hedgeMin)}` },
+    { id: 'bonds', weight: 1.5,
+      hurt: Math.max(under(bondsShare, P.bondsMin), over(bondsShare, P.bondsMax, P.bondsMax)),
+      title: 'Облигации', value: pct(bondsShare), norm: `${pct(P.bondsMin)}–${pct(P.bondsMax)}` },
+    // Расходы не заданы — мера не считается вовсе. Придумать за человека
+    // его траты и обвинить в нехватке денег было бы хуже, чем промолчать.
+    { id: 'cash', weight: 1.5, skip: cashMonths == null,
+      hurt: cashMonths == null ? 0 : under(cashMonths, P.cashMinMonths),
+      title: 'Свободные деньги',
+      value: cashMonths == null ? 'расходы не заданы' : `${dec1(cashMonths)} мес расходов`,
+      norm: `не меньше ${P.cashMinMonths} мес` }
+  ];
+
+  const live = checks.filter(c => !c.skip);
+  const maxScore = live.reduce((sum, c) => sum + c.weight, 0);
+  const raw = live.reduce((sum, c) => sum + c.weight * c.hurt, 0);
+  // Приводим к десятке независимо от того, сколько мер удалось посчитать:
+  // иначе портфель без заданных расходов выглядел бы безопаснее просто
+  // потому, что про него меньше известно.
+  const score = maxScore > 0 ? Math.round((raw / maxScore) * 100) / 10 : 0;
+
+  return {
+    score,
+    band: score <= P.riskOk ? 'норма' : score <= P.riskWarn ? 'повышенный риск' : 'критично',
+    checks,
+    // Три главных риска — те, что дороже всего обходятся сейчас
+    top: live.filter(c => c.hurt > 0).sort((a, b) => b.weight * b.hurt - a.weight * a.hurt).slice(0, 3)
+  };
+}
+
+/**
+ * КОГДА ЭТОТ СОВЕТ ОКАЖЕТСЯ ОШИБКОЙ.
+ *
+ * Совет, который нельзя опровергнуть, — не совет, а мнение: что бы ни
+ * случилось, автор задним числом объявит себя правым. Поэтому вместе с
+ * действием называется условие, при котором оно окажется неверным, — и
+ * называется ЧИСЛОМ, которое можно проверить, а не оговоркой «при
+ * неблагоприятном развитии событий».
+ *
+ * Условия берутся из тех же величин, что и сам совет: запас до предела
+ * доли, размер выигрыша в потоке, чувствительность к ставке. Каждое из них
+ * измеримо, и каждое можно проверить через месяц.
+ *
+ * @param {object} state
+ * @param {{plan:object}} action - выбранное действие
+ * @param {{yields?:object}} ctx
+ * @returns {Array<{id:string,text:string}>}
+ */
+function whenWrong(state, action, ctx = {}) {
+  // Возвращается ТЕКСТ, а не разметка: экранирует тот, кто вставляет его на
+  // экран. Расчётный слой про разметку знать не должен — и не знает: `esc`
+  // живёт в интерфейсе, и обращение к нему отсюда падало.
+  const out = [];
+  if (!action || !action.plan) return out;
+  const applied = applyPlan(state, action.plan);
+  if (!applied) return out;
+  const P = LIMITS;
+  const after = applied.state.summary;
+  const total = after.securities;
+
+  for (const t of action.plan.steps) {
+    if (!t.ticker || !(t.lots > 0)) continue;
+    const spent = t.lots * (t.price || 0);
+    const shareAfter = after.shares[t.ticker] || 0;
+
+    // 1. Сколько ещё можно вложить в эту бумагу, не выйдя за предел доли.
+    //    Отрицательный запас означает, что предел уже нарушен, — об этом
+    //    говорит отдельная строка плана, здесь не повторяемся.
+    const headroom = P.singlePosition * total - shareAfter * total;
+    if (headroom > 0) {
+      out.push({ id: 'headroom', text: `Совет перестанет быть верным, если довести ${t.name || t.ticker} `
+        + `ещё на ${money(headroom)}: доля выйдет за предел ${pct(P.singlePosition)}, и `
+        + `концентрация станет главным риском вместо перекоса структуры.` });
+    }
+
+    // 2. Весь выигрыш в потоке держится на том, что бумага продолжит платить.
+    const y = ctx.yields && ctx.yields[t.ticker] > 0 ? ctx.yields[t.ticker] : null;
+    if (y != null) {
+      const gain = netOfTax(spent * y, state.settings);
+      if (gain >= 1) {
+        out.push({ id: 'payout', text: `И если ${t.name || t.ticker} перестанет платить, `
+          + `прибавка к потоку в ${money(gain)} в год исчезнет, а купленная доля останется. `
+          + `Проверяемо: следующая выплата должна прийти в свой срок.` });
+      }
+    }
+
+    // 3. Облигацию двигает ставка, и тем сильнее, чем она длиннее.
+    if (allocationClass({ ticker: t.ticker, name: t.name, kind: 'bond' }) === 'bonds') {
+      const pos = (state.positions || []).find(p => p.ticker === t.ticker);
+      const years = Number(pos?.yearsLeft) > 0 ? Number(pos.yearsLeft) : null;
+      if (years != null) {
+        out.push({ id: 'rate', text: `Рост ключевой ставки на один пункт удешевит ${t.name || t.ticker} `
+          + `примерно на ${pct(years * P.stress.ratePoint)} — покупка окажется преждевременной, если ставку поднимут.` });
+      }
+    }
+  }
+  return out.slice(0, 3);
+}
+
+/**
+ * ИСТОРИЯ РЕШЕНИЙ — как менялся риск от собственных сделок.
+ *
+ * Хранить ничего не нужно, и это принципиально. Портфель на любую дату
+ * восстанавливается из журнала, а значит риск ДО и ПОСЛЕ каждой сделки
+ * считается задним числом той же моделью, что работает сегодня. Заведи мы
+ * отдельную запись «на тот момент риск был такой-то» — она разошлась бы с
+ * моделью при первой же её правке, и история стала бы врать тем убедительнее,
+ * чем старше.
+ *
+ * Цены берутся нынешние: сделка оценивается по тому, как она изменила
+ * СОСТАВ портфеля, а не по тому, угадана ли цена. Угадывание цены — не то
+ * решение, которое приложение берётся судить.
+ *
+ * @param {object} state
+ * @param {{limit?:number}} opts
+ * @returns {Array<object>} от свежих к старым
+ */
+function decisionHistory(state, opts = {}) {
+  const ops = (state.ops || []).filter(o => o.type === 'buy' || o.type === 'sell');
+  if (!ops.length) return [];
+  const limit = Number(opts.limit) > 0 ? Number(opts.limit) : 10;
+
+  const byDate = (state.ops || []).slice()
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const prices = {};
+  for (const p of (state.positions || [])) prices[p.ticker] = p.price;
+
+  // Снимок портфеля по сделкам ДО указанной (включительно или нет).
+  const snapshot = upTo => {
+    const acc = new Map();
+    for (const o of byDate) {
+      if (o.seq > upTo) break;
+      if (o.type !== 'buy' && o.type !== 'sell') continue;
+      const cur = acc.get(o.ticker) || { ticker: o.ticker, name: o.name, qty: 0,
+                                         price: prices[o.ticker] || o.price, kind: o.kind };
+      cur.qty += (o.type === 'buy' ? 1 : -1) * Number(o.qty || 0);
+      acc.set(o.ticker, cur);
+    }
+    const positions = [...acc.values()].filter(p => p.qty > 0);
+    const securities = positions.reduce((a, p) => a + positionValue(p), 0);
+    if (!(securities > 0)) return null;
+    const byClass = {}, bySector = {}, shares = {};
+    for (const p of positions) {
+      const cls = allocationClass(p), v = positionValue(p);
+      byClass[cls] = (byClass[cls] || 0) + v;
+      const sec = cls === 'stocks' ? sectorOf(p) : null;
+      if (sec) bySector[sec] = (bySector[sec] || 0) + v;
+      shares[p.ticker] = v / securities;
+    }
+    return { ...state, positions,
+             summary: { ...state.summary, securities, byClass, bySector, shares } };
+  };
+
+  byDate.forEach((o, i) => { o.seq = i; });
+  const trades = byDate.filter(o => o.type === 'buy' || o.type === 'sell');
+  const out = [];
+  for (const o of trades.slice(-limit)) {
+    const before = snapshot(o.seq - 1);
+    const after = snapshot(o.seq);
+    const rb = before ? riskIndex(before) : null;
+    const ra = after ? riskIndex(after) : null;
+    out.push({
+      date: o.date, type: o.type, ticker: o.ticker, name: o.name || o.ticker,
+      qty: o.qty, amount: o.amount,
+      riskBefore: rb ? rb.score : null,
+      riskAfter: ra ? ra.score : null,
+      // Первая сделка не с чем сравнивать: до неё портфеля не было.
+      why: rb && ra ? explainRiskChange(rb, ra) : 'первая сделка — сравнивать не с чем'
+    });
+  }
+  return out.reverse();
+}
+
+/**
+ * КАРТОЧКА ПОЗИЦИИ — ответ на вопрос «что делать с этой бумагой сейчас».
+ *
+ * Вклад в риск и в разнообразие считается ПРЕДЕЛЬНО: насколько изменились бы
+ * обе меры, если бы этой бумаги в портфеле не было. Так вклад получается из
+ * той же модели, по которой живёт всё остальное, а не из отдельной формулы,
+ * которая однажды с ней разойдётся. И он честен: бумага, чья доля в норме,
+ * даёт нулевой вклад в риск — потому что и правда ничего не портит.
+ *
+ * Чувствительности разные по природе. У облигации к ставке она измеряется:
+ * срок до погашения умножается на изменение ставки. У акции — допущение из
+ * политики, и так и подписано. К курсу привязано только то, что к нему
+ * действительно привязано; про остальное сказано «не считается», а не
+ * поставлен ноль: ноль означал бы знание, что связи нет.
+ *
+ * @param {object} state
+ * @param {string} ticker
+ * @param {{yields?:object}} ctx - измеренные доходности бумаг
+ * @returns {object|null}
+ */
+function positionCard(state, ticker, ctx = {}) {
+  const s = state.summary;
+  if (!s || !(s.securities > 0)) return null;
+  const pos = (state.positions || []).find(p => p.ticker === ticker && p.qty > 0);
+  if (!pos) return null;
+
+  const P = LIMITS;
+  const value = positionValue(pos);
+  const cost = positionCost(pos);
+  const share = value / s.securities;
+  const cls = allocationClass(pos);
+  const sector = cls === 'stocks' ? sectorOf(pos) : null;
+
+  // ВКЛАД В РИСК — сколько из общего штрафа приходится на эту бумагу.
+  //
+  // Первым делом я посчитал его иначе: насколько изменится индекс, если
+  // бумагу убрать. Так вклад вышел ОТРИЦАТЕЛЬНЫМ у всех бумаг сразу, и
+  // это не ошибка счёта, а негодное определение: изъятие любой позиции
+  // уменьшает портфель, доли остальных механически растут, и портфель
+  // «ухудшается». Получалось, что даже бумага, вылезшая за предел доли,
+  // числится снижающей риск. Считаем прямо: штраф тех мер, в которых
+  // виновата именно она.
+  const riskNow = riskIndex(state);
+  let riskAdd = null;
+  if (riskNow) {
+    const maxScore = riskNow.checks.filter(c => !c.skip).reduce((a, c) => a + c.weight, 0);
+    const over = (v, limit) => (v > limit ? Math.min(1, (v - limit) / limit) : 0);
+    let own = 0;
+    const posCheck = riskNow.checks.find(c => c.id === 'position');
+    if (posCheck) own += posCheck.weight * over(share, P.singlePosition);
+    const secCheck = riskNow.checks.find(c => c.id === 'sector');
+    if (secCheck && sector && s.bySector) {
+      const secShare = (s.bySector[sector] || 0) / s.securities;
+      // Доля этой бумаги в перекосе своего сектора — по её весу внутри него.
+      const inSector = secShare > 0 ? share / secShare : 0;
+      own += secCheck.weight * over(secShare, P.sectorMax) * inSector;
+    }
+    riskAdd = maxScore > 0 ? Math.round((own / maxScore) * 100) / 10 : 0;
+  }
+
+  // Разнообразие: доля своего сектора и сколько её съедает эта бумага.
+  const sectorShare = sector && s.bySector ? (s.bySector[sector] || 0) / s.securities : null;
+
+  // ЧУВСТВИТЕЛЬНОСТИ
+  const S = LIMITS.stress;
+  const rate = cls === 'bonds'
+    ? { known: true, measured: Number(pos.yearsLeft) > 0,
+        pct: -(Number(pos.yearsLeft) > 0 ? Number(pos.yearsLeft) : S.bondDuration) * P.sensitivityStep,
+        note: Number(pos.yearsLeft) > 0
+          ? `срок до погашения ${dec1(pos.yearsLeft)} лет`
+          : `срок неизвестен, взят типичный ${S.bondDuration} года` }
+    : cls === 'stocks'
+      ? { known: true, measured: false, pct: -S.rateStockBeta * P.sensitivityStep, note: 'допущение: точной связи не измерить' }
+      : { known: false, pct: null, note: 'к ставке напрямую не привязано' };
+
+  const fx = cls === 'hedge'
+    ? { known: true, measured: true, pct: 1 / (1 - P.sensitivityStep) - 1, note: 'цена золота назначается в валюте' }
+    // Ноль здесь означал бы знание, что связи нет. Мы её просто не измеряли.
+    : { known: false, pct: null, note: 'связь с курсом не измерена — у каждой компании своя' };
+
+  const y = Number(ctx.yields?.[ticker]) || 0;
+  const income = y > 0 ? netOfTax(value * y, state.settings) : null;
+
+  // РОЛЬ. Из класса и измеренной доходности, а не из названия бумаги.
+  const role = cls === 'hedge' ? 'защита'
+    : cls === 'bonds' ? 'доход'
+    : y >= (Number(state.settings?.marketYield) || LIMITS.marketYield) ? 'доход' : 'рост';
+
+  // ВЕРДИКТ. Порядок важен: сначала то, что нарушает правило, потом то, что
+  // его недобирает. Иначе бумага за пределом доли получала бы «докупить».
+  const targets = state.targets || {};
+  const classShare = (s.byClass?.[cls] || 0) / s.securities;
+  const classGap = (targets[cls] || 0) - classShare;
+  let verdict, why;
+  const overBy = value - P.singlePosition * s.securities;
+  if (share > P.singlePosition) {
+    verdict = 'сократить';
+    why = `Доля ${pct(share)} при пределе ${pct(P.singlePosition)} — это ${money(overBy)} сверх него.`
+      + ` Продавать не обязательно: перекос уходит сам, если следующие взносы идти будут мимо этой бумаги.`;
+  } else if (Number(pos.payoutAgeDays) > P.payout.stopped) {
+    verdict = 'заменить';
+    why = `Выплат нет ${Math.round(pos.payoutAgeDays / 30)} месяцев — дольше года.`
+      + ` Доводы, по которым бумага покупалась ради выплат, исчезли.`;
+  } else if (classGap > P.classGapWorth && share < P.singlePosition * P.headroomShare) {
+    const room = P.singlePosition * s.securities - value;
+    verdict = 'докупить';
+    why = `${classLabel(cls)} недобирают ${pct(classGap)} до цели, а до предела на бумагу`
+      + ` здесь ещё ${money(room)}.`;
+  } else {
+    verdict = 'держать';
+    why = `Доля ${pct(share)} в пределах нормы, класс отклоняется от цели на ${pct(Math.abs(classGap))}.`
+      + ` Действий не требуется — это тоже решение.`;
+  }
+
+  return {
+    ticker, name: pos.name || ticker, cls, role,
+    qty: pos.qty, price: pos.price, avgPrice: pos.avgPrice,
+    value, cost, profit: value - cost, profitPct: cost > 0 ? (value - cost) / cost : 0,
+    share, income, riskAdd, riskNow: riskNow ? riskNow.score : null,
+    sector, sectorShare, rate, fx,
+    verdict, why
+  };
+}
+
+/**
+ * ПРИ ЧЁМ СОВЕТ ОКАЗАЛСЯ БЫ ОШИБКОЙ.
+ *
+ * Совет, который нельзя опровергнуть, — не совет, а мнение: что бы ни
+ * случилось, задним числом он окажется прав. Поэтому у каждого действия
+ * называется условие ошибки, и притом ЧИСЛОМ, которое человек может
+ * проверить сам через месяц, а не оговоркой «при неблагоприятном развитии
+ * событий». Оговорка защищает автора совета; число защищает читателя.
+ *
+ * Возвращается текст без разметки: экранирует тот, кто рисует.
+ *
+ * @param {object} state
+ * @param {object|null} option - выбранный вариант из rankActions
+ * @param {{yields?:object}} ctx - фактические доходности бумаг, если измерены
+ * @returns {Array<{id:string, text:string}>} не больше трёх условий
+ */
+function whenWrong(state, option, ctx = {}) {
+  if (!option || !option.plan || !state?.summary) return [];
+  const out = [];
+  const P = LIMITS;
+  const s = state.summary;
+  const steps = (option.plan.steps || []).filter(t => t.ticker);
+  // Считаем по ФАКТИЧЕСКИ потраченному: бумага покупается лотами, и остаток
+  // на счёт. Считать по выделенной сумме значило бы завысить и запас, и поток.
+  const spentOn = t => (t.lots > 0 ? t.lots * (t.price || 0) : 0);
+  const spent = steps.reduce((a, t) => a + spentOn(t), 0);
+  const totalAfter = s.securities + spent;
+
+  // 1. ЗАПАС ДО ПРЕДЕЛА — в рублях и от доли ПОСЛЕ покупки. Доля до покупки
+  //    здесь бесполезна: решение принимается о будущем состоянии.
+  const main = steps.slice().sort((a, b) => spentOn(b) - spentOn(a))[0];
+  if (main) {
+    const held = (state.positions || [])
+      .filter(p => p.ticker === main.ticker && p.qty > 0)
+      .reduce((a, p) => a + positionValue(p), 0);
+    const after = held + spentOn(main);
+    const room = P.singlePosition * totalAfter - after;
+    out.push({ id: 'headroom', text: room >= 0
+      ? `${main.name || main.ticker}: до предела ${Math.round(P.singlePosition * 100)}% на бумагу`
+        + ` останется ещё ${Math.round(room).toLocaleString('ru-RU')} ₽. Если вкладывать в неё больше,`
+        + ` совет становится неверным.`
+      : `${main.name || main.ticker}: предел ${Math.round(P.singlePosition * 100)}% на бумагу будет`
+        + ` превышен на ${Math.round(-room).toLocaleString('ru-RU')} ₽. Если такой перекос неприемлем,`
+        + ` этот вариант неверен — дробить покупку или добавить новую бумагу.` });
+  }
+
+  // 2. ПОТОК — после налога, а не брутто: до счёта доходит именно эта сумма.
+  const yields = ctx.yields || {};
+  let gain = 0;
+  for (const t of steps) {
+    const y = Number(yields[t.ticker]);
+    if (y > 0) gain += spentOn(t) * y;
+  }
+  if (gain > 0) {
+    const net = netOfTax(gain, state.settings);
+    out.push({ id: 'payout', text: `Прибавка к выплатам — ${Math.round(net).toLocaleString('ru-RU')} ₽`
+      + ` в год после налога. Если выплаты урежут вдвое, останется`
+      + ` ${Math.round(net / 2).toLocaleString('ru-RU')} ₽ — и довод в пользу этой покупки слабеет вдвое.` });
+  }
+
+  // 3. СРОК ИЛИ РЕЗЕРВ — что из двух опаснее сейчас. Больше трёх условий
+  //    человек не читает, а нечитанное условие не защищает никого.
+  const expenses = Number(state.settings?.monthlyExpenses) || 0;
+  const months = expenses > 0 ? (Number(state.reserve) || 0) / expenses : null;
+  if (months != null && months < P.reserveMonths) {
+    out.push({ id: 'reserve', text: `Подушка ${dec1(months)} мес расходов при цели`
+      + ` ${P.reserveMonths} мес. Если деньги понадобятся раньше, взнос правильнее`
+      + ` направить в резерв, а не в бумаги.` });
+  } else {
+    const years = Number(state.settings?.goal?.years) || 0;
+    out.push({ id: 'horizon', text: years > 0
+      ? `Расчёт исходит из ${years} лет до цели. Если деньги понадобятся раньше — покупать бумаги неверно.`
+      : `Расчёт исходит из срока в 1 год и дольше. Если деньги понадобятся раньше — покупать бумаги неверно.` });
+  }
+
+  return out.slice(0, 3);
+}
+
+/**
+ * КРАСНЫЕ ФЛАГИ — то, что требует внимания сегодня.
+ *
+ * Флаг ставится только по измеренному. Если величины нет, флага нет — но и
+ * молчания нет: неизвестное так и называется неизвестным. Придумать число
+ * ради красивого списка значило бы соврать в самом опасном месте.
+ *
+ * @param {object} state
+ * @param {{yield?:number}} ctx - фактическая доходность портфеля, если измерена
+ * @returns {Array<{id:string,title:string,detail:string,severity:string}>}
+ */
+function redFlags(state, ctx = {}) {
+  const out = [];
+  const s = state.summary;
+  if (!s || !(s.securities > 0)) return out;
+  const P = LIMITS;
+  const risk = riskIndex(state);
+  const expenses = Number(state.settings?.monthlyExpenses) || 0;
+
+  if (risk) {
+    for (const c of risk.checks) {
+      if (c.skip || !(c.hurt > 0)) continue;
+      out.push({ id: c.id, title: c.title, detail: `${c.value} при норме ${c.norm}`,
+                 severity: c.hurt >= 0.5 ? 'высокая' : 'средняя' });
+    }
+  }
+
+  // Подушка. Резерв лежит вне брокерского счёта, поэтому это отдельная мера,
+  // а не та же, что свободные деньги.
+  if (expenses > 0) {
+    const months = (Number(state.reserve) || 0) / expenses;
+    if (months < 1) {
+      out.push({ id: 'reserve', title: 'Подушка на чёрный день',
+        detail: `${dec1(months)} мес расходов при цели ${P.reserveMonths} мес`,
+        severity: months < 0.5 ? 'высокая' : 'средняя' });
+    }
+  }
+
+  // Реальная доходность: номинальная минус инфляция, по формуле, а не
+  // вычитанием. Без измеренной доходности флаг не ставится вовсе.
+  const nominal = Number(ctx.yield);
+  const infl = Number(state.settings?.inflation) || 0;
+  if (nominal > 0 && infl > 0) {
+    const real = (1 + nominal) / (1 + infl) - 1;
+    if (real < 0) {
+      out.push({ id: 'real', title: 'Доход не обгоняет инфляцию',
+        detail: `${pct(nominal)} годовых при инфляции ${pct(infl)} — это ${pct(real)} настоящего роста`,
+        severity: 'высокая' });
+    }
+  }
+
+  const order = { 'высокая': 0, 'средняя': 1 };
+  return out.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+}
+
+/**
+ * ИНВЕСТИЦИОННЫЙ КОМИТЕТ — сводка на сегодня.
+ *
+ * Про «рынок позитивный или негативный» здесь сознательно ничего нет.
+ * Данных, чтобы судить о направлении рынка, у приложения не появится: это
+ * было бы предсказание, а приложение считает только проверяемое. Вместо
+ * этого — УСЛОВИЯ: во что сейчас обходятся деньги и что приносят бумаги.
+ * Это арифметика, а не прогноз, и решение из неё следует честно.
+ *
+ * Уверенность — тоже измеримая величина: доля входных данных, которые
+ * известны, а не угаданы. Низкая уверенность не повод молчать, но повод
+ * сказать, чего не хватает.
+ *
+ * @param {object} state
+ * @param {{yield?:number, best?:object, flags?:Array}} ctx
+ */
+function investmentCommittee(state, ctx = {}) {
+  const s = state.summary;
+  if (!s || !(s.securities > 0)) return null;
+  const set = state.settings || {};
+  const risk = riskIndex(state);
+  const flags = ctx.flags || redFlags(state, ctx);
+
+  // УСЛОВИЯ — из двух измеренных чисел, без предсказаний.
+  const rate = set.keyRate && set.keyRate.rate > 0 ? set.keyRate.rate / 100 : null;
+  const income = Number(ctx.yield) > 0 ? Number(ctx.yield) : null;
+  let conditions = 'Условия не назвать: ключевая ставка неизвестна.';
+  if (rate != null && income != null) {
+    conditions = income >= rate
+      ? `Бумаги приносят ${pct(income)} годовых, деньги стоят ${pct(rate)} — портфель обгоняет ставку.`
+      : `Деньги стоят ${pct(rate)} годовых, бумаги приносят ${pct(income)} — вклад и денежный рынок`
+        + ` сейчас конкурируют с портфелем. Это не повод продавать: ставка меняется, а состав портфеля`
+        + ` рассчитан на годы.`;
+  } else if (rate != null) {
+    conditions = `Деньги стоят ${pct(rate)} годовых. Доходность портфеля ещё не измерена —`
+      + ` сравнить не с чем.`;
+  }
+
+  // УВЕРЕННОСТЬ — доля известного среди того, что нужно для выводов.
+  const known = [
+    { id: 'prices', ok: !!set.lastPriceUpdate, what: 'свежие цены' },
+    { id: 'broker', ok: !!set.tiSyncedAt, what: 'журнал от брокера' },
+    { id: 'expenses', ok: Number(set.monthlyExpenses) > 0, what: 'месячные расходы' },
+    { id: 'rate', ok: rate != null, what: 'ключевая ставка' },
+    { id: 'income', ok: income != null, what: 'доходность бумаг' }
+  ];
+  const share = known.filter(k => k.ok).length / known.length;
+  const missing = known.filter(k => !k.ok).map(k => k.what);
+
+  return {
+    conditions,
+    risk: risk ? { score: risk.score, band: risk.band, top: risk.top[0] || null } : null,
+    // Возможность — та мера, которую выбранное действие улучшает сильнее
+    // всех. Если действия нет, выдумывать возможность не из чего.
+    opportunity: ctx.best && ctx.best.reasons
+      ? (ctx.best.reasons.find(r => r.better) || null) : null,
+    action: ctx.best || null,
+    flags,
+    confidence: {
+      level: share >= 0.8 ? 'высокая' : share >= 0.5 ? 'средняя' : 'низкая',
+      missing,
+      // Чего не хватает — важнее самой оценки: это единственное, что можно
+      // исправить, чтобы выводы стали крепче.
+      note: missing.length ? `Не хватает: ${missing.join(', ')}.` : 'Все нужные данные на месте.'
+    }
+  };
+}
+
+/**
+ * ПОЧЕМУ РИСК ИЗМЕНИЛСЯ — СЛОВАМИ.
+ *
+ * Число «было 2,0, стало 1,7» говорит что, но не почему. Человек не обязан
+ * держать в голове пять мер и вычитать их одну из другой: назвать причину —
+ * работа приложения, а не читателя.
+ *
+ * @param {object|null} before - риск-индекс до
+ * @param {object|null} after - риск-индекс после
+ * @returns {string|null}
+ */
+function explainRiskChange(before, after) {
+  if (!before || !after) return null;
+  const was = new Map(before.checks.map(c => [c.id, c.weight * c.hurt]));
+  const moved = after.checks
+    .map(c => ({ title: c.title.toLowerCase(), diff: c.weight * c.hurt - (was.get(c.id) || 0) }))
+    .filter(x => Math.abs(x.diff) > 1e-4)
+    .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+
+  if (!moved.length) return 'риск не изменился: ни одна из мер не сдвинулась';
+  const total = after.score - before.score;
+  const dir = total < 0 ? 'снизился' : total > 0 ? 'вырос' : 'не изменился';
+  // Причину ищем среди мер, сдвинувшихся В ТУ ЖЕ сторону, что и итог.
+  // Самая крупная подвижка бывает противоположной, и тогда выходило
+  // «снизился, потому что ухудшилась мера» — фраза, спорящая сама с собой.
+  const sameWay = moved.filter(x => (x.diff < 0) === (total < 0));
+  const main = sameWay[0] || moved[0];
+  const cause = main.diff < 0 ? `улучшилась мера «${main.title}»` : `ухудшилась мера «${main.title}»`;
+  // Если что-то двигалось и в другую сторону, об этом надо сказать: иначе
+  // объяснение выглядит полнее, чем оно есть.
+  const against = moved.length - sameWay.length;
+  const rest = against > 0
+    ? `, хотя ${against === 1 ? 'одна мера сдвинулась' : `мер сдвинулось против: ${against}`} в обратную сторону`
+    : (moved.length > 1 ? `, всего сдвинулось мер: ${moved.length}` : '');
+  return `${dir}, потому что ${cause}${rest}`;
+}
+
+/**
+ * ЭФФЕКТ ПЛАНА: «было → станет».
+ *
+ * Совет без последствия — это мнение. Человеку нужно видеть, что именно
+ * изменится, иначе сравнить два решения он не может и вынужден верить на
+ * слово. Поэтому план применяется к копии портфеля и обе картины считаются
+ * одним и тем же кодом: доли, риск-индекс, свободные деньги.
+ *
+ * Считается только то, что известно наверняка: доли, риск, деньги на счёте.
+ * Ни вероятность цели, ни будущий доход сюда не идут — один взнос двигает
+ * их на доли процента, и показывать такое движение значило бы выдавать шум
+ * за результат.
+ *
+ * @param {object} state - состояние портфеля
+ * @param {{amount:number, steps:Array<object>}} plan - раскладка взноса
+ * @returns {{before:object, after:object, changes:Array<object>}|null}
+ */
+/**
+ * Применить план к копии портфеля. Вынесено отдельно, потому что сравнивать
+ * варианты между собой можно только одним и тем же кодом: два похожих
+ * расчёта «после» разъедутся при первой же правке, и сравнение станет
+ * сравнением ошибок, а не решений.
+ *
+ * @param {object} state - состояние портфеля
+ * @param {{amount:number, steps:Array<object>}} plan
+ * @returns {{state:object, spent:number}|null}
+ */
+function applyPlan(state, plan) {
+  const s = state && state.summary;
+  if (!s || !plan || !Array.isArray(plan.steps) || !(s.securities > 0)) return null;
+
+  const byClass = { ...(s.byClass || {}) };
+  const bySector = { ...(s.bySector || {}) };
+  const values = {};
+  for (const p of (state.positions || [])) {
+    if (p.qty > 0) values[p.ticker] = (values[p.ticker] || 0) + positionValue(p);
+  }
+  let spent = 0;
+  for (const t of plan.steps) {
+    // Тратится не весь взнос: бумага покупается лотами, остаток на счёт.
+    const sum = t.lots != null && t.lots > 0 ? t.lots * (t.price || 0) : 0;
+    if (!(sum > 0)) continue;
+    spent += sum;
+    byClass[t.cls] = (byClass[t.cls] || 0) + sum;
+    if (t.ticker) values[t.ticker] = (values[t.ticker] || 0) + sum;
+    const sec = t.cls === 'stocks' ? sectorOf({ ticker: t.ticker, name: t.name, kind: 'stock' }) : null;
+    if (sec) bySector[sec] = (bySector[sec] || 0) + sum;
+  }
+  if (!(spent > 0)) return null;
+
+  const securities = s.securities + spent;
+  const shares = {};
+  for (const [ticker, v] of Object.entries(values)) shares[ticker] = v / securities;
+  return {
+    spent,
+    state: { ...state,
+      summary: { ...s, securities, byClass, bySector, shares,
+                 cash: (s.cash || 0) + (plan.amount - spent) } }
+  };
+}
+
+function planEffect(state, plan) {
+  const s = state && state.summary;
+  if (!s || !plan || !Array.isArray(plan.steps) || !(s.securities > 0)) return null;
+
+  // Картина «после» считается общим кодом — тем же, каким сравниваются
+  // варианты между собой. Своя копия расчёта здесь однажды разъехалась бы
+  // с той, и «до/после» показывало бы разницу двух ошибок.
+  const applied = applyPlan(state, plan);
+  if (!applied) return null;
+  const after = applied.state, spent = applied.spent;
+  const { byClass, securities } = { byClass: after.summary.byClass, securities: after.summary.securities };
+
+  const riskBefore = riskIndex(state);
+  const riskAfter = riskIndex(after);
+  const part = (sum, total) => (total > 0 ? (sum || 0) / total : 0);
+
+  const changes = [
+    { id: 'risk', title: 'Риск-индекс',
+      from: riskBefore ? riskBefore.score : null, to: riskAfter ? riskAfter.score : null,
+      fmt: v => (v == null ? '—' : dec1(v)) },
+    { id: 'stocks', title: 'Акции',
+      from: part(s.byClass?.stocks, s.securities), to: part(byClass.stocks, securities), fmt: pct },
+    { id: 'bonds', title: 'Облигации',
+      from: part(s.byClass?.bonds, s.securities), to: part(byClass.bonds, securities), fmt: pct },
+    { id: 'hedge', title: 'Защитные активы',
+      from: part(s.byClass?.hedge, s.securities), to: part(byClass.hedge, securities), fmt: pct },
+    { id: 'cash', title: 'Свободные деньги',
+      from: s.cash || 0, to: after.summary.cash, fmt: money }
+  ];
+
+  return { before: riskBefore, after: riskAfter, spent, changes };
+}
+
+/**
+ * МЕРЫ ВАРИАНТА. Шесть величин, у каждой известно направление «лучше».
+ * Считаются одним кодом для всех вариантов — иначе сравнение превращается
+ * в сравнение расчётных ошибок.
+ *
+ * @param {object} st - состояние (до или после действия)
+ * @param {object} ctx - цель и доходности бумаг для денежного потока
+ */
+function actionMetrics(st, ctx) {
+  const s = st.summary, total = s.securities || 0;
+  const risk = riskIndex(st);
+  const shares = s.shares || {};
+  let top = 0;
+  for (const v of Object.values(shares)) if (v > top) top = v;
+
+  // Отклонение от целевой структуры: сумма расхождений по трём классам.
+  const targets = st.targets || {};
+  let drift = 0;
+  for (const cls of ['stocks', 'bonds', 'hedge']) {
+    const have = total > 0 ? (s.byClass?.[cls] || 0) / total : 0;
+    drift += Math.abs(have - (targets[cls] || 0));
+  }
+
+  // Денежный поток после налога: по фактическим доходностям бумаг.
+  let income = 0;
+  for (const [ticker, share] of Object.entries(shares)) {
+    const y = ctx.yields ? ctx.yields[ticker] : null;
+    if (y > 0) income += share * total * y;
+  }
+
+  return {
+    risk: risk ? risk.score : 0,
+    top,
+    drift,
+    hedge: total > 0 ? (s.byClass?.hedge || 0) / total : 0,
+    income: netOfTax(income, st.settings),
+    // Дефицит до цели: чем больше денег работает, тем он меньше.
+    gap: Math.max(0, (ctx.goal || 0) - (total + (s.cash || 0)))
+  };
+}
+
+// Направление «лучше» у каждой меры. Ниже — значит меньше лучше.
+const METRIC_DIRS = { risk: -1, top: -1, drift: -1, hedge: 1, income: 1, gap: -1 };
+const METRIC_TITLES = { risk: 'риск', top: 'крупнейшая позиция', drift: 'отклонение от структуры',
+                        hedge: 'защитные активы', income: 'доход после налогов', gap: 'дефицит до цели' };
+
+/**
+ * РАНЖИРОВАНИЕ ДЕЙСТВИЙ БЕЗ ВЕСОВ.
+ *
+ * Веса вида «0,4 за риск и 0,3 за структуру» выглядят наукой, но берутся с
+ * потолка: обосновать, почему именно 0,4, невозможно, а результат от них
+ * зависит целиком. Поэтому здесь другой порядок.
+ *
+ * 1. Запреты. Вариант отбрасывается, если поднимает риск, усиливает
+ *    нарушение предела доли или оставляет меньше денег, чем на месяц
+ *    расходов. Это не «минус баллы», а отказ: такие действия не должны
+ *    попадать в советы вовсе.
+ * 2. Доминирование. Вариант А лучше Б, если не хуже ни по одной мере и
+ *    лучше хотя бы по одной. Здесь веса не нужны в принципе.
+ * 3. Когда никто никого не превосходит — берётся тот, кто улучшает БОЛЬШЕ
+ *    мер одновременно. Ничьи разрешаются объявленным порядком, а не
+ *    случайностью: при равных вариантах ответ обязан быть одинаковым.
+ *
+ * @param {Array<{id:string,title:string,plan:object,note?:string}>} options
+ * @returns {{best:object|null, ranked:Array<object>, rejected:Array<object>}}
+ */
+function rankActions(state, options, ctx = {}) {
+  const before = actionMetrics(state, ctx);
+  const P = LIMITS;
+  const expenses = Number(state.settings?.monthlyExpenses) || 0;
+  const scored = [];
+  const rejected = [];
+
+  for (const opt of options) {
+    const applied = applyPlan(state, opt.plan);
+    if (!applied) { rejected.push({ ...opt, why: 'покупать нечего' }); continue; }
+    const after = actionMetrics(applied.state, ctx);
+
+    // ЗАПРЕТЫ
+    let veto = null;
+    if (after.risk > before.risk + P.riskNoise) veto = `риск вырос с ${dec1(before.risk)} до ${dec1(after.risk)}`;
+    else if (after.top > before.top && after.top > P.singlePosition) {
+      veto = `доля крупнейшей бумаги растёт за предел ${pct(P.singlePosition)}: ${pct(after.top)}`;
+    } else if (expenses > 0 && applied.state.summary.cash < expenses * P.cashMinMonths
+               && applied.state.summary.cash < state.summary.cash) {
+      veto = 'на счёте останется меньше, чем было, и меньше месяца расходов';
+    }
+    if (veto) { rejected.push({ ...opt, why: veto, before, after }); continue; }
+
+    const improved = [], worsened = [];
+    for (const [key, dir] of Object.entries(METRIC_DIRS)) {
+      const diff = (after[key] - before[key]) * dir;
+      // Порог значимости: движение меньше сотой доли процента — шум, и
+      // называть его улучшением значило бы выдавать шум за результат.
+      if (diff > 1e-4) improved.push(key);
+      else if (diff < -1e-4) worsened.push(key);
+    }
+    scored.push({ ...opt, before, after, improved, worsened, spent: applied.spent });
+  }
+
+  const dominates = (a, b) => {
+    let better = false;
+    for (const [key, dir] of Object.entries(METRIC_DIRS)) {
+      const d = (a.after[key] - b.after[key]) * dir;
+      if (d < -1e-4) return false;
+      if (d > 1e-4) better = true;
+    }
+    return better;
+  };
+
+  const ranked = scored.slice().sort((a, b) => {
+    if (dominates(a, b)) return -1;
+    if (dominates(b, a)) return 1;
+    if (b.improved.length !== a.improved.length) return b.improved.length - a.improved.length;
+    if (a.worsened.length !== b.worsened.length) return a.worsened.length - b.worsened.length;
+    // Объявленная развязка ничьих: сначала меньший риск, потом меньшая
+    // концентрация, и в самом конце — имя. Случайности здесь быть не должно.
+    if (Math.abs(a.after.risk - b.after.risk) > 1e-4) return a.after.risk - b.after.risk;
+    if (Math.abs(a.after.top - b.after.top) > 1e-4) return a.after.top - b.after.top;
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  const best = ranked[0] || null;
+  if (best) {
+    best.reasons = [
+      ...best.improved.map(k => ({ key: k, title: METRIC_TITLES[k],
+        from: before[k], to: best.after[k], better: true })),
+      ...best.worsened.map(k => ({ key: k, title: METRIC_TITLES[k],
+        from: before[k], to: best.after[k], better: false }))
+    ];
+  }
+  return { best, ranked, rejected };
+}
 
 /**
  * Главный совет — ответ на вопрос «что делать сегодня».
@@ -1932,8 +2883,20 @@ function buyRecommendations(state, screenerResults, limit = 5) {
     const matching = rows.filter(r => kindOf(r) === wantClass);
     if (matching.length) {
       items = matching;
-      note = `Сильнее всего не хватает: ${classLabel(wantClass)} — около ${need[0].sum.toLocaleString('ru-RU')} \u20bd до плана. `
-        + 'Показаны бумаги этого класса.';
+      // ДВА РАЗНЫХ ЧИСЛА ОДНИМИ СЛОВАМИ. Здесь — недобор при нынешнем
+      // размере портфеля. В совете «докупить» — сумма, после которой доля
+      // СТАНЕТ целевой; она больше примерно втрое, потому что покупка
+      // увеличивает и сам портфель. Обе величины верные, но на соседних
+      // экранах оба назывались «до плана», и разница читалась как ошибка.
+      // Доля класса после покупки: (было + x) / (портфель + x) = цель.
+      // Отсюда x = недобор / (1 − цель).
+      const wantTarget = targets[wantClass] || 0;
+      const toBuy = need[0].sum > 0 && wantTarget < 1
+        ? Math.round(need[0].sum / (1 - wantTarget)) : 0;
+      note = `Сильнее всего не хватает: ${classLabel(wantClass)} — ${need[0].sum.toLocaleString('ru-RU')} \u20bd `
+        + `до целевой доли при нынешнем размере портфеля`
+        + (toBuy > need[0].sum ? `; чтобы доля стала целевой после покупки, нужно ${toBuy.toLocaleString('ru-RU')} \u20bd` : '')
+        + '. Показаны бумаги этого класса.';
     } else {
       note = `До плана не хватает ${classLabel(wantClass)}, но по твоим условиям таких бумаг не нашлось — `
         + 'ниже остальное, что подошло.';
@@ -2067,7 +3030,16 @@ function replacementIdeas(state, candidates = [], opts = {}) {
         // года — а серия у него всё ещё три года, и по ней приложение звало
         // продавать свои бумаги. Больше года без выплат — это уже не «платит»,
         // и звать на такую бумагу нельзя, какой бы ни была прошлая доходность.
-        if (c.payoutAgeDays != null && c.payoutAgeDays > PAYOUT_AGE.stopped) continue;
+        //
+        // Для ОБМЕНА порог строже, чем для просмотра, и вот почему. Доходность
+        // считается за год до последней выплаты у каждой бумаги своей. Пока
+        // обе платят регулярно, окна почти совпадают и сравнение честное. Но
+        // если кандидат замолчал год назад, сравниваются РАЗНЫЕ годы: свежие
+        // выплаты своей бумаги против позапрошлогодних чужой. Обмен при этом
+        // стоит комиссии и налога с прибыли — платить за доход, которого уже
+        // год никто не видел, приложение звать не должно. В списке идей такая
+        // бумага остаётся: смотреть на неё можно, менять на неё — нет.
+        if (c.payoutAgeDays != null && c.payoutAgeDays > PAYOUT_AGE.fresh) continue;
         // Бумага, про выплаты которой известно, что данные негодны, не
         // может быть поводом продать свою. Совет обязан опираться на
         // проверенное — а здесь проверка как раз не прошла.
@@ -2133,6 +3105,13 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       continue;
     }
 
+    // Подписей про «выплаты прекратились» здесь больше нет, и вот почему.
+    // Кандидат старше порога свежести до этого места не доходит: он отсеян
+    // выше, при отборе. Значит ветки «если выплаты вернутся» и «это N мес
+    // назад» были недостижимы — мёртвый код, который читался как работающая
+    // осторожность. Каждая бумага, попавшая сюда, платила за последний год,
+    // и подпись «выплаты за 12 месяцев» для неё — правда без оговорок.
+
     out.push(best.kind === 'bonds' ? {
       kind: 'replace', cls, from: p.ticker, to: best.c.ticker, gain: best.gain, cost,
       how: howTo(p.name, best.c.name, true),
@@ -2141,7 +3120,7 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       detail: `${pct(mine.ytm)} против ${pct(best.c.ytm)} к погашению. `
         + `На твоей позиции в ${rub(value)} разница даёт около ${rub(best.gain)} в год; `
         + `комиссии за обмен — примерно ${rub(cost)}, они окупятся за ${payback < 1 ? 'меньше месяца' : `${Math.round(payback)} мес`}.`
-        + (best.c.yearsLeft ? ` Погашение через ${best.c.yearsLeft} лет${goalYears ? ` — до твоей цели` : ''}.` : ''),
+        + (best.c.yearsLeft ? ` Погашение через ${dec1(best.c.yearsLeft)} лет${goalYears ? ` — до твоей цели` : ''}.` : ''),
       note: `Доходность к погашению — величина договорная, но реализуется только при удержании до конца срока. `
         + `Продажа фиксирует текущий результат по бумаге: если она в минусе, убыток станет настоящим, `
         + `а на ИИС он не уменьшит налоги по другим счетам.`
@@ -2150,6 +3129,11 @@ function replacementIdeas(state, candidates = [], opts = {}) {
       how: howTo(p.name, best.c.name, false),
       toName: best.c.name, toPrice: Number(best.c.price) || 0, toLot: Number(best.c.lot) || 1,
       title: `${p.name} → ${best.c.name}`,
+      // ЗА КАКИЕ ДВЕНАДЦАТЬ МЕСЯЦЕВ. Доходность считается за год до ПОСЛЕДНЕЙ
+      // выплаты, а не до сегодня. Пока бумага платит регулярно, разница
+      // незаметна. Но у переставшей платить «выплаты за 12 месяцев» — это
+      // выплаты позапрошлого года, и выгода обмена, посчитанная от них,
+      // выдаётся за будущий доход. Число оставляем, обещание убираем.
       detail: `Выплаты за 12 месяцев по данным биржи, до налога: ${pct((mine.yieldPct || 0))} против ${pct(best.c.yieldPct)}, `
         + `и вторая платит ${best.c.streak} ${best.c.streak < 5 ? 'года' : 'лет'} подряд`
         // Дата сама по себе требует от читателя считать месяцы. «08.07.2025»
@@ -2158,9 +3142,6 @@ function replacementIdeas(state, candidates = [], opts = {}) {
         // словами — там, где он уже перестал быть свежим.
         + (best.c.payoutLastDate
           ? ` — последняя выплата ${String(best.c.payoutLastDate).split('-').reverse().join('.')}`
-            + (best.c.payoutAgeDays > PAYOUT_AGE.fresh
-              ? `, это ${Math.round(best.c.payoutAgeDays / 30)} мес назад: с тех пор выплат не было`
-              : '')
           : '')
         + `. На позиции в ${rub(value)} `
         + `разница — около ${rub(best.gain)} в год чистыми, комиссии обмена ${rub(cost)}.`,
@@ -2446,7 +3427,7 @@ function swapPlan(state, idea, opts = {}) {
   };
 }
 
-return {STRATEGIES, LIMITS, primaryAction, allSteps, classLabel, taxDeduction, policyStatement, buyRecommendations, replacementIdeas, verdict, swapPlan};
+return {STRATEGIES, LIMITS, riskIndex, decisionHistory, positionCard, whenWrong, redFlags, investmentCommittee, explainRiskChange, planEffect, applyPlan, actionMetrics, rankActions, primaryAction, allSteps, classLabel, taxDeduction, policyStatement, buyRecommendations, replacementIdeas, verdict, swapPlan};
 })());
 
 /* ─── core/screener.js ─── */
@@ -5557,7 +6538,7 @@ async function tiFacts(token, positions, settings = {}) {
     rows.push({
       ticker: p.ticker, name: p.name, kind: 'stock', guaranteed: false,
       perYear: yearlyNet, yieldPct: value > 0 ? yearlyNet / value : 0,
-      detail: paidBack > 0 ? `выплачено ${Math.round(paidBack * 100) / 100} ₽ на бумагу за 12 мес` : 'выплат не было'
+      detail: paidBack > 0 ? `выплачено ${dec(Math.round(paidBack * 100) / 100)} ₽ на бумагу за 12 мес` : 'выплат не было'
     });
   }
 
@@ -6177,7 +7158,10 @@ async function bondFacts(secId) {
       known: true,
       name: facts.SECNAME || facts.NAME || secId,
       maturity,
-      yearsLeft: maturity ? Math.max(0, daysBetween(today(), maturity) / 365) : null,
+      // До десятой доли года: печатать «4,602739726027397 лет» бессмысленно,
+      // а округлять при показе — значит однажды забыть об этом в одном
+      // из мест, где срок печатается.
+      yearsLeft: maturity ? Math.round(Math.max(0, daysBetween(today(), maturity) / 365) * 10) / 10 : null,
       faceValue,
       couponValue,
       couponsPerYear,
@@ -6216,7 +7200,7 @@ async function upcomingDividends(positions, settings = {}) {
     if (next) {
       out.push({
         ticker: p.ticker, name: p.name, date: next.date,
-        perShare: next.value,
+        perShare: Math.round((Number(next.value) || 0) * 100) / 100,
         total: Math.round(next.value * p.qty),
         net: Math.round(netOfTax(next.value * p.qty, settings))
       });
@@ -6484,7 +7468,133 @@ function crashTest(state, drop = -0.30) {
   };
 }
 
-return {explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, valueChart, marketContext, rateMeaning, crashTest};
+/**
+ * СТРЕСС-СЦЕНАРИИ.
+ *
+ * Обвал рынка приложение считало давно, но рынок падает не единственным
+ * способом. Три беды бьют по разным частям портфеля, и портфель, стойкий к
+ * одной, бывает беззащитен перед другой:
+ *
+ *   рубль     — дорожает всё, что привязано к валюте: золото растёт;
+ *   ставка    — дешевеют облигации, и тем сильнее, чем длиннее бумага;
+ *   дивиденды — цена бумаг не меняется, беднеет ПОТОК. Показывать здесь
+ *               просадку капитала было бы неправдой.
+ *
+ * Про акции честно: их реакция на ставку и курс у каждой компании своя, и
+ * данных для этого у приложения нет. Поэтому берётся объявленное допущение
+ * из политики, а на экране оно так и называется — допущение, а не расчёт.
+ *
+ * @param {object} state - состояние портфеля
+ * @param {object} [yields] - фактические доходности бумаг, если известны
+ * @returns {Array<object>} по одному разбору на сценарий
+ */
+function stressScenarios(state, yields = null) {
+  const owned = (state.positions || []).filter(p => Number(p.qty) > 0);
+  if (!owned.length) return [];
+  const P = SH.POLICY, S = P.stress;
+
+  const marked = owned.map(p => ({
+    ...p,
+    cyclical: /нефт|газ|метал|уголь|сталь|алмаз/i.test(`${p.name} ${p.sector || ''}`),
+    defensiveSector: /ритейл|телеком|фарм|энерго|продукт/i.test(`${p.name} ${p.sector || ''}`)
+  }));
+
+  const marketBeta = a => {
+    if (isHedge(a)) return -0.5;
+    if (classify(a) === KIND.BOND) return 0.15;
+    return a.cyclical ? 1.4 : (a.defensiveSector ? 0.6 : 1.0);
+  };
+
+  // Множитель цены по сценарию. Единица — цена не изменилась.
+  const priceFactor = (a, id) => {
+    const cls = allocationClass(a);
+    if (id === 'market') return 1 + P.crashDrop * marketBeta(a);
+    if (id === 'fx') {
+      // Рубль подешевел — значит в рублях дорожает то, что к валюте привязано.
+      // Золото привязано; рублёвая облигация нет; про акции см. выше.
+      return cls === 'hedge' ? 1 / (1 - S.fxDrop) : 1;
+    }
+    if (id === 'rate') {
+      if (cls === 'bonds') {
+        const years = Number(a.yearsLeft) > 0 ? Number(a.yearsLeft) : S.bondDuration;
+        return Math.max(0, 1 - years * S.rateStep);
+      }
+      if (cls === 'stocks') return Math.max(0, 1 - S.rateStockBeta * S.rateStep);
+      return 1;
+    }
+    if (id === 'div') return 1;      // выплаты режут поток, а не цену
+    if (id === 'all') {
+      return priceFactor(a, 'market') * priceFactor(a, 'fx') * priceFactor(a, 'rate');
+    }
+    return 1;
+  };
+
+  const incomeFactor = (a, id) => {
+    // Купон облигации назначен договором: его не «урезают» решением совета.
+    if (id === 'div' || id === 'all') return allocationClass(a) === 'stocks' ? 1 - S.divCut : 1;
+    return 1;
+  };
+
+  const list = [
+    { id: 'market', title: `Рынок ${pct(P.crashDrop)}`, hint: 'широкое падение акций' },
+    { id: 'fx', title: `Рубль −${Math.round(S.fxDrop * 100)}%`, hint: 'дорожает то, что привязано к валюте' },
+    { id: 'rate', title: `Ставка +${dec1(S.rateStep * 100)} п.п.`, hint: 'дешевеют облигации, и тем сильнее, чем они длиннее' },
+    { id: 'div', title: `Выплаты −${Math.round(S.divCut * 100)}%`, hint: 'капитал на месте, беднеет поток' },
+    { id: 'all', title: 'Всё сразу', hint: 'рынок, курс и ставка одновременно' }
+  ];
+
+  return list.map(sc => {
+    const byClass = {}, byClassAfter = {};
+    let before = 0, after = 0, incomeBefore = 0, incomeAfter = 0;
+    const items = [];
+    for (const a of marked) {
+      const v = positionValue(a);
+      const f = priceFactor(a, sc.id);
+      const cls = allocationClass(a);
+      before += v; after += v * f;
+      byClass[cls] = (byClass[cls] || 0) + v;
+      byClassAfter[cls] = (byClassAfter[cls] || 0) + v * f;
+      const y = yields && yields[a.ticker] > 0 ? yields[a.ticker] : 0;
+      incomeBefore += v * y;
+      incomeAfter += v * y * incomeFactor(a, sc.id);
+      items.push({ ticker: a.ticker, name: a.name, value: v, delta: v * (f - 1) });
+    }
+
+    // Вклады классов складываются в общую просадку — это проверяется тестом:
+    // разложение, которое не сходится с итогом, вводит в заблуждение.
+    const contrib = Object.keys(byClass).map(cls => ({
+      cls, label: classLabel ? classLabel(cls) : cls,
+      from: byClass[cls], to: byClassAfter[cls],
+      delta: byClassAfter[cls] - byClass[cls]
+    })).sort((a, b) => a.delta - b.delta);
+
+    const shares = {};
+    for (const a of marked) {
+      const v = positionValue(a) * priceFactor(a, sc.id);
+      shares[a.ticker] = (shares[a.ticker] || 0) + v;
+    }
+    for (const k of Object.keys(shares)) shares[k] = after > 0 ? shares[k] / after : 0;
+
+    const stressed = { ...state,
+      summary: { ...state.summary, securities: after, byClass: byClassAfter, shares } };
+    const riskBefore = SH.riskIndex(state);
+    const riskAfter = SH.riskIndex(stressed);
+
+    return {
+      id: sc.id, title: sc.title, hint: sc.hint,
+      before, after, drop: before - after,
+      dropPct: before > 0 ? (after - before) / before : 0,
+      contrib, items: items.sort((a, b) => a.delta - b.delta),
+      income: { from: incomeBefore, to: incomeAfter, known: incomeBefore > 0 },
+      risk: riskAfter ? { before: riskBefore ? riskBefore.score : null, after: riskAfter.score,
+                          band: riskAfter.band,
+                          why: SH.explainRiskChange(riskBefore, riskAfter) } : null,
+      assumed: sc.id === 'rate' || sc.id === 'fx' || sc.id === 'all'
+    };
+  });
+}
+
+return {explainSecurity, upcomingPayments, cashflowSummary, analyzeBuy, portfolioGaps, valueChart, marketContext, rateMeaning, crashTest, stressScenarios};
 })());
 
 /* ─── ui/store.js ─── */
@@ -6562,7 +7672,10 @@ async function getState() {
     lastSync: meta.lastSync || null,
     tiConnected: !!meta.tiToken && !!meta.tiAccount,
     tiSyncedAt: meta.tiSyncedAt || null,
-    tiProblem: meta.tiProblem || null    // расхождение с брокером: молчать нельзя
+    tiProblem: meta.tiProblem || null,   // расхождение с брокером: молчать нельзя
+    // Мелкое расхождение журнал не блокирует, но и не исчезает: записать
+    // его и никому не показать — то же самое, что скрыть.
+    tiNote: meta.tiNote || null
   };
 
   // Если рыночной цены нет — подставляем цену покупки, но ЧЕСТНО помечаем это.
@@ -7590,6 +8703,7 @@ const pct = SH.pct;
 const fetchJSON = SH.fetchJSON;
 const noteSwallowed = SH.noteSwallowed;
 const swallowedErrors = SH.swallowedErrors;
+const monthWord = SH.monthWord;
 const dec = SH.dec;
 const dec1 = SH.dec1;
 const ASSUMED = SH.ASSUMED;
@@ -7892,11 +9006,169 @@ function viewHome(st) {
       <div class="sub">бумаги ${money(s.securities)}${s.cash > 0 ? ' · свободно ' + money(s.cash) : ''}</div>
       ${st.costIsApproximate
         ? `<div class="chip" style="background:rgba(138,151,171,.14);color:var(--dim)">прибыль пока не считается</div>`
-        : `<div class="chip ${up ? 'up' : 'down'}">${up ? '+' : '−'}${money(Math.abs(s.profit))} · ${pct(Math.abs(s.profitPct))}</div>
+        : `<div class="chip ${up ? 'up' : 'down'}">${up ? '+' : '−'}${money(Math.abs(s.profit))} · ${up ? '' : '−'}${pct(Math.abs(s.profitPct))}</div>
            <div class="sub" style="margin-top:6px;opacity:.75">вложено в бумаги ${money(s.invested)}</div>`}
     </div>
 
     ${connectionLine(st)}
+
+    ${(() => {
+      // РИСК И ЦЕЛЬ — НА ГЛАВНОМ ЭКРАНЕ.
+      //
+      // Считалось это давно, а показывалось на четвёртой вкладке: чтобы
+      // узнать, рискован ли портфель и дойдёт ли он до цели, приходилось
+      // искать. Ответ на оба вопроса должен быть виден сразу.
+      //
+      // Числа здесь намеренно грубые. Прогноз на пять лет с точностью до
+      // рубля и вероятность с сотыми долями процента сообщают уверенность,
+      // которой у случайной модели нет.
+      const risk = SH.riskIndex(st);
+      const g = st.goal;
+      if (!risk && !(g && g.hasGoal)) return '';
+
+      const riskBlock = risk ? `
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <span>Риск портфеля</span>
+          <b style="font-size:17px;color:${
+            risk.band === 'норма' ? 'var(--ok)' : risk.band === 'критично' ? 'var(--danger)' : 'var(--warn)'
+          }">${dec1(risk.score)} из 10 — ${esc(risk.band)}</b>
+        </div>
+        ${risk.top.length
+          ? risk.top.map(c => `<div class="diff">• ${esc(c.title)}: ${esc(c.value)}
+              <span class="muted">(норма ${esc(c.norm)})</span></div>`).join('')
+          : '<div class="diff muted">Все пять мер в пределах нормы.</div>'}` : '';
+
+      const word = g && g.hasGoal ? SH.chanceWord(g.chance) : null;
+      const gap = g && g.hasGoal ? (st.settings.goal.amount - (g.range ? g.range.median : 0)) : 0;
+      const goalBlock = g && g.hasGoal && g.range ? `
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <span>Через ${st.settings.goal.years} лет</span>
+            <b>${esc(SH.roughMoney(g.range.median))}</b>
+          </div>
+          <div class="diff">Разброс: от ${esc(SH.roughMoney(g.range.bad))}
+            до ${esc(SH.roughMoney(g.range.good))}</div>
+          ${word ? `<div class="diff">Дойти до ${esc(SH.roughMoney(st.settings.goal.amount))} —
+            вероятность <b>${esc(word)}</b>${gap > 0
+              ? `, не хватает примерно ${esc(SH.roughMoney(gap))}` : ''}</div>` : ''}
+        </div>` : '';
+
+      // КРАСНЫЕ ФЛАГИ. То, что требует внимания сегодня, — до всех прочих
+      // разборов: человек, у которого пустая подушка, не должен узнавать об
+      // этом четвёртой строкой после прогноза на пять лет.
+      const flags = SH.redFlags(st, {});
+      const flagBlock = flags.length ? `
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--warn)">
+            Требует внимания</div>
+          ${flags.slice(0, 4).map(f => `<div class="diff">• <b>${esc(f.title)}</b>:
+            ${esc(f.detail)}</div>`).join('')}
+        </div>` : '';
+
+      // ГЛАВНЫЙ ВЫВОД. Числа выше отвечают на «сколько», но не на «и что
+      // теперь». Вывод собирается из того же, что показано рядом, — иначе
+      // фраза начнёт расходиться с числами под ней.
+      const verdictLine = (() => {
+        const parts = [];
+        if (risk) {
+          const worst = risk.top[0];
+          parts.push(risk.band === 'норма'
+            ? `Портфель в норме${worst ? `, слабее всего — ${worst.title.toLowerCase()} (${worst.value})` : ''}`
+            : `Риск ${risk.band}${worst ? ` — главное: ${worst.title.toLowerCase()} (${worst.value})` : ''}`);
+        }
+        if (word) {
+          parts.push(gap > 0
+            ? `нынешним темпом до цели не хватит примерно ${SH.roughMoney(gap)}, вероятность дойти — ${word}`
+            : `нынешним темпом цель достижима, вероятность — ${word}`);
+        }
+        if (!parts.length) return '';
+        // Каждая часть — отдельное предложение, значит начинается с большой
+        // буквы. Склейка через точку без этого давала «...(0,6 мес). нынешним».
+        const text = parts.map(t => t.charAt(0).toUpperCase() + t.slice(1)).join('. ');
+        return `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px">Главный вывод на сегодня</div>
+          <div style="line-height:1.6">${esc(text)}.</div>
+        </div>`;
+      })();
+
+      return `<div class="card" style="margin-bottom:12px">${riskBlock}${goalBlock}${flagBlock}${verdictLine}
+        <div class="muted" style="margin-top:10px;line-height:1.6">Суммы округлены намеренно:
+          разброс считается по трём тысячам случайных траекторий, и точность до рубля в нём
+          была бы выдумкой.</div>
+      </div>`;
+    })()}
+
+    ${(() => {
+      // СЕГОДНЯ СТОИТ СДЕЛАТЬ.
+      //
+      // Порядок задаётся не весами, а доминированием: вариант лучше, если не
+      // хуже ни по одной мере и лучше хотя бы по одной. Веса вида «0,4 за
+      // риск» выглядят наукой, но берутся с потолка, а результат зависит от
+      // них целиком. Отдельно стоят запреты: действие, поднимающее риск или
+      // усиливающее нарушение предела, не занижается в списке, а не
+      // показывается вовсе.
+      const amount = Number(st.settings?.monthlyContribution) || 0;
+      if (!amount || !st.summary || !(st.summary.securities > 0)) return '';
+      const full = SH.contributionPlan(st, { rows: [] });
+      if (!full || !full.steps.length) return '';
+      const half = SH.contributionPlan(st, { rows: [] }, Math.round(amount / 2));
+      const stretched = full.steps.some(t => t.stretched);
+
+      const options = [{ id: 'full', title: `Купить на весь взнос ${money(amount)}`, plan: full }];
+      if (half && half.steps.length) {
+        options.push({ id: 'half',
+          title: stretched
+            ? `Разбить покупку: ${money(half.amount)} сейчас, остальное в следующем месяце`
+            : `Купить на половину взноса ${money(half.amount)}`,
+          plan: half });
+      }
+      const res = SH.rankActions(st, options, { goal: Number(st.settings?.goal?.amount) || 0 });
+      if (!res.best) return '';
+
+      const fmt = (key, v) => key === 'risk' ? dec1(v)
+        : key === 'gap' || key === 'income' ? SH.roughMoney(v) : pct(v);
+      const list = res.ranked.slice(0, 3).map((o, i) => {
+        const what = o.plan.steps.filter(t => t.ticker)
+          .map(t => `${money(t.amount)} → ${esc(t.name || t.ticker)}`).join(', ');
+        return `<div class="diff"><b>${i + 1}. ${esc(o.title)}</b>${what ? `<br>${what}` : ''}</div>`;
+      }).join('');
+
+      // ИНВЕСТИЦИОННЫЙ КОМИТЕТ. Условия — не прогноз: две измеренные
+      // величины, ставка и доходность бумаг, и вывод из их сравнения.
+      // Уверенность — доля известных данных, а не ощущение.
+      const com = SH.investmentCommittee(st, { best: res.best, yield: st.goal?.expected });
+      const comBlock = com ? `
+        <div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line)">
+          <div class="diff">${esc(com.conditions)}</div>
+          <div class="diff">Уверенность вывода: <b>${esc(com.confidence.level)}</b>
+            <span class="muted">${esc(com.confidence.note)}</span></div>
+        </div>` : '';
+
+      return `<div class="card" style="margin-bottom:12px">
+        <h3>Инвестиционный комитет — сегодня</h3>
+        ${comBlock}
+        ${list}
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px">Почему выбран первый вариант</div>
+          ${res.best.reasons.map(r => `<div class="diff" style="color:${
+            r.better ? 'var(--ok)' : 'var(--warn)'}">• ${esc(r.title)}: ${
+            esc(fmt(r.key, r.from))} → ${esc(fmt(r.key, r.to))}</div>`).join('')}
+        </div>
+        ${(() => {
+          // Совет, который нельзя опровергнуть, — мнение, а не совет: что бы
+          // ни случилось, задним числом он окажется прав. Условие ошибки
+          // называется числом, которое можно проверить через месяц.
+          const wrong = SH.whenWrong(st, res.best, {});
+          if (!wrong.length) return '';
+          return `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px">Когда этот совет окажется ошибкой</div>
+            ${wrong.map(w => `<div class="diff muted">• ${esc(w.text)}</div>`).join('')}
+          </div>`;
+        })()}
+        ${res.rejected.length ? `<div class="muted" style="margin-top:10px;line-height:1.6">
+          Отброшено без показа: ${res.rejected.map(r => esc(r.why)).join('; ')}.</div>` : ''}
+      </div>`;
+    })()}
 
     ${(() => {
       const s2 = store.storageState();
@@ -7961,7 +9233,7 @@ function viewHome(st) {
         <div class="track" style="height:10px"><div class="fill" style="width:${Math.max(1, pctDone)}%;background:var(--accent)"></div></div>
         <div class="muted" style="margin-top:8px">
           Пройдено ${pctDone}%. ${g.reachIn != null
-            ? `При текущем темпе цель придёт примерно через ${g.reachIn} лет — к ${g.etaYear} году. Учтены взносы, налоговый вычет и ожидаемая доходность состава.`
+            ? `При текущем темпе цель придёт примерно через ${dec(g.reachIn)} лет — к ${g.etaYear} году. Учтены взносы, налоговый вычет и ожидаемая доходность состава.`
             : `При нынешнем темпе цель дальше пятидесяти лет — загляни в «Что стоит сделать»: там посчитаны рычаги.`}
         </div>
         ${(() => {
@@ -8036,7 +9308,7 @@ function viewHome(st) {
         <div class="muted" style="margin-top:8px">
           ${pctDone >= 100
             ? 'Три месяца расходов закрыты — можно спокойно инвестировать весь взнос.'
-            : `Хватит на ${dec1(months)} ${months < 1 ? 'месяца' : months < 5 ? 'месяца' : 'месяцев'} жизни. Цель — три месяца: столько нужно, чтобы пережить потерю дохода, не продавая бумаги.`}
+            : `Хватит на ${dec1(months)} ${monthWord(months)} жизни. Цель — три месяца: столько нужно, чтобы пережить потерю дохода, не продавая бумаги.`}
         </div>
         ${pctDone < 100 ? `<button class="btn ghost wide" id="bAddRes2" style="margin-top:10px">Пополнить резерв</button>` : ''}
       </div>`;
@@ -8287,11 +9559,21 @@ function renderIdeas(res) {
   }
   const rec = res.rec;
   const line = r => r.kind === 'bond'
-    ? `${pct(r.ytm)} к погашению · ${r.yearsLeft} лет · ${r.type === 'gov' ? 'ОФЗ' : 'корп.'}${
+    ? `${pct(r.ytm)} к погашению · ${dec1(r.yearsLeft)} лет · ${r.type === 'gov' ? 'ОФЗ' : 'корп.'}${
         r.couponType === 'float' ? ' · плавающий купон' : ''}${
         r.yearsToOffer > 0 && r.yearsLeft > r.yearsToOffer + 0.1
           ? ` · <span style="color:var(--warn)">оферта через ${r.yearsToOffer} г.</span>` : ''}`
-    : `${pct((r.yieldPct || 0))} выплат за год · ${r.streak ? `${r.streak} ${r.streak < 5 ? 'года' : 'лет'} подряд` : 'без выплат'}${r.sector ? ' · ' + esc(r.sector) : ''}`;
+    // ЗА КАКОЙ ГОД. Окно доходности отсчитывается назад от ПОСЛЕДНЕЙ
+    // выплаты, а не от сегодня, — иначе годовой плательщик, заплативший
+    // одиннадцать месяцев назад, показывал бы ноль. Но у бумаги, переставшей
+    // платить, подпись «выплат за год» превращалась во враньё: на одной
+    // карточке стояло «22,6% выплат за год» и тут же «последняя выплата 14
+    // мес назад». Читалось как доход, который бумага приносит сейчас.
+    : `${pct((r.yieldPct || 0))} ${
+        r.payoutAgeDays > PAYOUT_AGE.fresh
+          ? `за год до последней выплаты${r.payoutLastDate ? ` (${String(r.payoutLastDate).split('-').reverse().join('.')})` : ''}`
+          : 'выплат за год'
+      } · ${r.streak ? `${r.streak} ${r.streak < 5 ? 'года' : 'лет'} подряд` : 'без выплат'}${r.sector ? ' · ' + esc(r.sector) : ''}`;
   const card = r => `<div class="rowitem" style="cursor:default;align-items:flex-start">
       <span class="rt" style="flex:1">
         <b>${esc(r.name)} <span class="muted" style="font-weight:500">${esc(r.ticker)}</span></b>
@@ -8370,6 +9652,31 @@ function viewJournal(st) {
   return `<div class="hero"><div class="lbl">Журнал</div>
       <div class="sum" style="font-size:30px">${st.ops.length}</div>
       <div class="sub">${st.ops.length === 1 ? 'операция' : 'операций'} · внесено за год ${money(st.yearDeposits)}</div></div>
+
+    ${(() => {
+      // КАК РЕШЕНИЯ МЕНЯЛИ РИСК. Расчёт был, а на экране его не было —
+      // мёртвый расчёт хуже отсутствующего: он создаёт видимость работы.
+      const hist = SH.decisionHistory(st, { limit: 5 });
+      const shown = hist.filter(d => d.riskBefore != null);
+      if (!shown.length) return '';
+      return `<div class="card"><h3>Как решения меняли риск</h3>
+        ${shown.map(d => {
+          const better = d.riskAfter < d.riskBefore;
+          return `<div class="diff" style="padding:5px 0">
+            <div style="display:flex;justify-content:space-between">
+              <span>${String(d.date).split('-').reverse().join('.')} ·
+                ${d.type === 'buy' ? 'купил' : 'продал'} ${esc(d.name)}</span>
+              <span style="color:${better ? 'var(--ok)' : 'var(--warn)'}">${
+                dec1(d.riskBefore)} → ${dec1(d.riskAfter)}</span>
+            </div>
+            <div class="muted">${esc(d.why)}</div>
+          </div>`;
+        }).join('')}
+        <div class="muted" style="margin-top:8px;line-height:1.6">Риск на каждую дату пересчитан
+          сегодняшней моделью по журналу, а не взят из старой записи: сохранённая оценка
+          разошлась бы с моделью при первой её правке.</div>
+      </div>`;
+    })()}
 
     <div class="card"><h3>Записать вручную</h3>
       <div class="muted" style="margin-bottom:6px">${st.settings.tiConnected
@@ -8450,8 +9757,8 @@ function viewSettings(st) {
       <div style="font-size:22px;font-weight:750;margin-bottom:4px">${money(st.settings.goal.amount)}</div>
       <div class="muted" style="margin-bottom:12px">за ${st.settings.goal.years} ${st.settings.goal.years === 1 ? 'год' : 'лет'} · сейчас ${money(st.summary.total)}</div>
       ${st.goal.fits
-        ? `<div class="diff" style="color:var(--ok)">✓ План сходится: при взносе ${money(st.settings.monthlyContribution)}/мес цель придёт через ${st.goal.reachIn} лет</div>`
-        : `<div class="diff">При нынешнем взносе цель придёт через <b>${st.goal.reachIn ?? 'более 50'} лет</b>, а не за ${st.settings.goal.years}.</div>
+        ? `<div class="diff" style="color:var(--ok)">✓ План сходится: при взносе ${money(st.settings.monthlyContribution)}/мес цель придёт через ${dec1(st.goal.reachIn)} лет</div>`
+        : `<div class="diff">При нынешнем взносе цель придёт через <b>${st.goal.reachIn != null ? dec1(st.goal.reachIn) : 'более 50'} лет</b>, а не за ${st.settings.goal.years}.</div>
            ${st.goal.levers.map(l => `<div class="diff">• ${esc(l.text)}</div>`).join('')}`}
       <div class="diff">Через ${st.settings.goal.years} лет накопится от <b>${money(st.goal.range.bad)}</b> до <b>${money(st.goal.range.good)}</b>,
         чаще всего около <b>${money(st.goal.range.median)}</b>.</div>
@@ -9035,14 +10342,29 @@ async function openDiagnostics() {
       return `<div style="display:flex;justify-content:space-between;padding:5px 0;
         color:${same ? 'var(--dim)' : 'var(--danger)'};font-size:12.5px">
         <span>${esc(t)}</span><span>${a} ${same ? '=' : '≠'} ${b}</span></div>`;
-    }).join('') + `<div style="display:flex;justify-content:space-between;padding:7px 0;
+    }).join('') + (() => {
+      // ТОТ ЖЕ ДОПУСК, ЧТО У СВЕРКИ. Раньше здесь стоял жёсткий рубль, и
+      // получалась картина, в которой приложение спорит само с собой:
+      // журнал собран и принят, а диагностика красит те же деньги красным
+      // как поломку. Округление за десятки операций — не поломка.
+      const gap = Math.abs(st.summary.cash - broker.cash);
+      const ok = gap <= Math.min(60, Math.max(1, st.ops.length * 0.5));
+      return `<div style="display:flex;justify-content:space-between;padding:7px 0;
       border-top:1px solid var(--line);font-size:12.5px;
-      color:${Math.abs(st.summary.cash - broker.cash) < 1 ? 'var(--dim)' : 'var(--danger)'}">
-      <span>свободные деньги</span><span>${money(st.summary.cash)} / ${money(broker.cash)}</span></div>`
+      color:${ok ? 'var(--dim)' : 'var(--danger)'}">
+      <span>свободные деньги</span><span>${money(st.summary.cash)} / ${money(broker.cash)}${
+        ok && gap > 0.01 ? ` <span class="muted">· ${dec(gap.toFixed(2))} ₽ округления</span>` : ''}</span></div>`;
+    })()
       + (unnamed ? `<div class="muted" style="margin-top:10px;line-height:1.6">
           Названия ${unnamed} ${unnamed === 1 ? 'бумаги' : 'бумаг'} брокер сейчас не отдал — они показаны
           техническим кодом, и строки выглядят как расхождение. Данные целы: обнови из Т-Инвестиций
-          ещё раз, имена подставятся из запаса.</div>` : '');
+          ещё раз, имена подставятся из запаса.</div>` : '')
+      // Заметка со сверки. Записать расхождение в хранилище и никому его
+      // не показать — то же самое, что скрыть: человек видит два разных
+      // числа и не знает, поломка это или округление.
+      + ((st.settings.tiNote || []).length
+        ? `<div class="muted" style="margin-top:10px;line-height:1.6">${
+            st.settings.tiNote.map(esc).join('<br>')}</div>` : '');
   }
 
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">Диагностика</h2>
@@ -9510,7 +10832,30 @@ async function openPlan() {
             ? ` — ${t.lots} шт по ${dec(t.price)} ₽${t.lotSize > 1 ? ` (${t.wholeLots} ${t.wholeLots === 1 ? 'лот' : t.wholeLots < 5 ? 'лота' : 'лотов'} по ${t.lotSize})` : ''}${
                 t.leftover > 50 ? `, останется ${money(t.leftover)}` : ''}`
             : ` <span style="color:var(--warn)">— ${t.lotSize > 1 ? `лот из ${t.lotSize} шт` : 'одна штука'} дороже этой части взноса, копи или измени деление</span>`) : ''}${
-          t.blockReason ? `<br><span class="muted">${esc(t.blockReason)}</span>` : ''}</p>`).join('')}
+          t.blockReason ? `<br><span class="muted">${esc(t.blockReason)}</span>` : ''}${
+          // Покупка за пределом доли — не мелочь: приложение обязано сказать,
+          // что советует то, против чего само же предостерегает.
+          t.stretchNote ? `<br><span style="color:var(--warn)">${esc(t.stretchNote)}</span>` : ''}</p>`).join('')}
+        ${(() => {
+          // «БЫЛО → СТАНЕТ». Совет без последствия — это мнение. Пока
+          // изменение не показано числом, сравнить два решения нельзя.
+          const eff = SH.planEffect(st, cp);
+          if (!eff) return '';
+          const row = c => {
+            const same = c.fmt(c.from) === c.fmt(c.to);
+            return `<div class="diff" style="display:flex;justify-content:space-between;padding:4px 0">
+              <span>${esc(c.title)}</span>
+              <span>${esc(c.fmt(c.from))} → <b>${esc(c.fmt(c.to))}</b>${
+                same ? ' <span class="muted">без изменений</span>' : ''}</span></div>`;
+          };
+          return `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+            <div style="font-weight:700;font-size:14px;margin-bottom:6px">Что изменится после покупки</div>
+            ${eff.changes.map(row).join('')}
+            <p class="muted" style="margin:8px 0 0;line-height:1.6">Показано только то, что меняется
+              наверняка: доли, риск и деньги на счёте. Вероятность дойти до цели один взнос двигает
+              на доли процента — показывать такое движение значило бы выдавать шум за результат.</p>
+          </div>`;
+        })()}
         <p class="muted" style="margin-top:8px">Деление — по недобору до целевых долей, посчитанному от суммы ПОСЛЕ взноса: класс, отстающий сильнее, получает больше. Поэтому класс, сегодня стоящий чуть выше цели, всё равно получает часть — иначе сам взнос сдвинул бы его долю вниз. Внутри класса названа бумага с наибольшей фактической доходностью из уже имеющихся.</p>
       </div>`;
     })()}
@@ -9842,7 +11187,7 @@ function openWhatsNew() {
     ${item('Поиск по рынку перестал обходить защиту стороной', 'Раздел «что подходит портфелю» ищет тот класс, которого не хватает сильнее всего. Защита в этом сравнении не участвовала вовсе: её доля не попадала в расчёт, разность выходила нечислом, а любое сравнение с нечислом ложно. Выбор поэтому всегда падал на акции или облигации — даже когда золота 5% при цели 10% и не хватало именно его. Заготовленный текст «искал защиту: фонды на золото» лежал в коде мёртвым и не показывался ни разу.')}
     ${item('Числа с десятой пишутся по-русски', 'Правило было заведено для процентов, но мимо него остались сроки, месяцы и секунды: на одном экране стояло «резерва на 1.0 мес» рядом с «10,8%», а в диагностике — «ответ за 0.4 с». Теперь запись одна на все величины: целое без хвоста, десятая через запятую. Проверка следит, чтобы новых точек не завелось.')}
     ${item('Взнос больше не спорит с карточкой долей', 'На «Портфеле» акции стояли выше цели — 65,9% из 65%, — а план тут же отдавал им бо́льшую часть взноса. Арифметика была верной: недобор считается от суммы ПОСЛЕ пополнения, и класс, стоящий у цели сегодня, всё равно должен получить часть, иначе сам взнос сдвинет его долю вниз. Не было сказано главного — от какой суммы идёт счёт. Теперь сказано.')}
-    ${item('Скрытые ошибки перестали быть скрытыми', 'Три последние найденные поломки — вызов функции из чужого модуля, чтение переменной, которой нет, и нажатие вместо числа — жили за пойманным и никому не показанным исключением. Приложение выглядело работающим и объясняло происходящее неправильно. Глотать ошибки местами приходится: одна не пришедшая история выплат не повод рушить экран. Глотать молча — нет. Теперь всё пойманное и не показанное попадает в список: место, текст, число повторов. Смотреть его в «Ещё» → «Диагностика», в самом низу. Пусто там — хороший знак; если экран ведёт себя странно, причина, скорее всего, лежит именно в этом списке.')}\n    ${item('Копейки перестали блокировать журнал', 'Сверка отвергала журнал при расхождении в деньгах больше рубля. Но деньги — это остаток: в них стекается округление КАЖДОЙ операции за всё время, тогда как бумаги сходятся точно, штука в штуку. На истории из полусотни операций жёсткий рубль означал вечный отказ, а совет «попробуй ещё раз через минуту» не мог помочь никогда: пересборка даёт ровно тот же остаток. Теперь допуск растёт с длиной истории — полтинник на операцию, не больше шестидесяти рублей всего. Пропущенная операция так не спрячется: самая мелкая из них крупнее допуска. Само расхождение не исчезает бесследно — оно записано и видно в диагностике.')}\n    ${item('Проданные бумаги перестали быть безымянными навсегда', 'Журнал не пересобирался с сообщением «брокер не назвал имена N бумаг». Причина: имя бумаги спрашивалось только по внутреннему коду, а у части операций брокер отдаёт лишь FIGI. Бумагу, которой уже нет в портфеле, взять больше неоткуда — и она оставалась безымянной навсегда, сколько ни повторяй. Теперь справочник спрашивается обоими способами. Найденные по операциям имена запоминаются под обоими кодами: раньше запоминались только бумаги ИЗ ТЕКУЩЕГО портфеля, поэтому после первой же полной пересборки проданные терялись. И сообщение теперь называет сами коды: «не назвал имена 19 бумаг» без перечисления не оставляло ни одной зацепки.')}\n    ${item('Приложение перестало обвинять токен, не проверив его', 'Надпись «прошлый токен не сработал, возможно истёк или отозван» появлялась без единого обращения к брокеру — просто по факту пустого журнала. Между тем самая частая причина другая: теряется отметка счёта, и тогда обновление молча не начинается вовсе, сколько бы раз ни вводить один и тот же рабочий токен. Теперь приложение сначала спрашивает брокера. Токен принят — отметка счёта восстанавливается сама, журнал собирается, и человек ничего не вводит. Токен отвергнут — так и сказано, вместе с ответом брокера. Нет связи — сказано про связь. Заодно все четыре места, где журнал пересобирается принудительно, защищены от перезагрузки посреди записи: проверка требует этого от каждого.')}\n    ${item('Рабочий токен больше не объявляется сломанным', 'Пустой журнал приложение объясняло единственным способом: «прошлый токен не сработал, всё показанное устарело, введи новый». Но пустым журнал бывает и когда токен в полном порядке — например, если пересборка оборвалась на середине. Теперь случаи различаются: если данные по токену уже когда-то приходили, приложение так и говорит — дело не в токене — и предлагает собрать журнал заново одной кнопкой, называя дату последней удачной загрузки. Заодно закрыта причина: перезагрузка ради обновления больше не может случиться посреди записи журнала, а ждёт её окончания.')}\n    ${item('Разбор собственной правки: семь мест, где обновление ещё могло не доехать', 'Проверка выложенного накануне механизма нашла: оболочка клалась под одним адресом из двух, и офлайн зависел от того, какой из запросов при установке удался; отказ сервера при выкладке показывал пустой экран вместо сохранённой копии; тихое обновление копии не доживало до конца — обработчик усыпляли раньше; подписки на сообщения ставились после регистрации, и сообщение могло пропасть; самая первая установка вызывала лишнюю перезагрузку у нового человека; второе нажатие кнопки в течение минуты не делало ничего; а перепроверка обработчика зависела от опроса версии, который при переходе со старого обработчика вправе соврать. Исправлено всё семь.')}\n    ${item('Обновление перестало зависеть от везения', 'Приложение спрашивало сервер о новой сборке, скачивая самого себя. Но страницу, которой управляет служебный обработчик, нельзя обойти своим запросом: ни принудительное чтение, ни довесок в адресе не помогают — обработчик стоит перед кэшем браузера и отвечает первым. Проверка читала не сервер, а его копию, и делала вывод «всё свежее». Круг замыкался: приложение не обновлялось и честно докладывало, что не нужно. Теперь версия спрашивается у файла обработчика — за ним браузер ходит мимо всех копий, и он в тысячу раз меньше приложения. Кнопка обновления больше не снимает обработчик перед перезагрузкой (снятие завершается лишь после закрытия всех вкладок, а до тех пор отвечает он же), а просит его выбросить копии и уступить место. Перезагрузка делается по факту смены обработчика, а не по надежде.')}\n    ${item('Экраны и листы проверяются на четырнадцати краевых счетах', 'К пяти краевым случаям добавились ещё девять: обнулившиеся цены, достигнутая цель, нулевой срок цели, счёт из одной защиты, незаданная цель, нулевой взнос, продано больше купленного. На каждом открываются и листы, и все четыре экрана — причём состояние берётся так же, как его берёт сама отрисовка, а не собирается руками: иначе проверялась бы выдумка. Кроме пустых значений и нечисел теперь ловится и бесконечность — её даёт деление на ноль, и в вёрстку она попадает молча.')}\n    ${item('Пустой счёт больше не роняет проверку на обвал', 'Лист брал самую просевшую и самую устойчивую бумагу первой и последней строкой списка — а если бумаг нет вовсе, списка тоже нет, и лист падал целиком: вместо ответа человек видел ошибку запуска. Такое бывает у каждого дважды: когда счёт только открыт и когда всё продано. Теперь в этом случае сказано прямо — падать нечему, деньги на счёте рынок не двигает. Заодно листы стали проверяться на пяти краевых портфелях: пустой счёт, одни деньги, бумага без известной цены, позиция, проданная в ноль, и незаданные расходы.')}\n    ${item('Заголовки месяцев в журнале встали в правильный падеж', 'Над лентой стояло «ИЮНЯ 2026» — обрывок фразы «16 июня», а не заголовок. Список названий был один на два разных случая: в дате месяц отвечает на вопрос «когда» и стоит в родительном, а заголовок группы — это название месяца само по себе, именительный. Теперь списка два, и проверка отрисованного журнала не пропустит возврат.')}\n    ${item('Опечатка в имени метода больше не доживёт до экрана', 'Соседний класс к «имени, которого нет»: вызов несуществующего метода падает с «это не функция», а потолок ожидания такую ошибку глотает — и снова получается «биржа не ответила» при исправной бирже. Теперь проверка собирает все списки экспорта модулей и сверяет с ними каждый вызов через store, moex и остальные псевдонимы. Заодно расширена проверка областей видимости: она смотрит и на стрелочные помощники, а не только на объявления функций.')}\n    ${item('Сравнение двух бумаг падало при каждом нажатии', 'Расчёт сравнения читал настройки из переменной, которой в нём нет, — ровно та же ошибка, что и в разборе выплат, только в другом месте. Обработчик кнопки исключений не ловит, поэтому лист просто замирал без единого слова. Теперь настройки приходят доводом. И появилась проверка, считающая область видимости КАЖДОЙ функции отдельно: прежняя смотрела, объявлено ли имя где-то в файле, а такие ошибки и живут там, где имя объявлено во множестве соседних функций, но не в этой.')}\n    ${item('Ставки перестали спорить с остальными числами', 'Правило про запятую стерегло десятые, но не сотые: ключевая ставка и купонная ставка печатались с точкой рядом с долями, где стоит запятая. Переведены и они, а правило расширено — теперь оно смотрит и на сотые, а не только на десятые.')}\n    ${item('Скрытые ошибки стали сетью, а не просто списком', 'Приложение давно записывает ошибки, которые проглотил потолок ожидания, и показывает их в диагностике. Теперь на этот список смотрит и стенд: он открывает все листы подряд и валит сборку, если среди проглоченного оказалась ошибка кода — обращение к тому, чего нет. От сети такие ошибки не зависят, значит списывать их на биржу нельзя. Обе поломки этой недели ловятся этой сетью автоматически.')}\n    ${item('Купоны и дивиденды не приходили из-за опечатки', 'Разбор выплат по портфелю читал состояние приложения из переменной, которой в этой функции нет и не было. При подключённом брокере вызов падал сразу же — всегда. Ошибку глотал потолок ожидания, план получал пустые выплаты и писал, что биржа не ответила, — при полностью доступной бирже. Тот же разбор кормит и карточку «Сколько приносит портфель». Ошибку нашла новая проверка листов: в браузере она пряталась за проглоченным исключением, а на стенде видна сразу.')}\n    ${item('Запрос к бирже теперь один, а не две копии', 'Тело запроса и запасного пути к нему лежали в файле дважды — в слое биржи и в слое фактов о бумагах. Проверка стерегла их побайтовое совпадение, но чинить две одинаковые функции руками — способ однажды ошибиться: правку внесут в одну, а во вторую скопируют с опечаткой. Теперь тело одно, остальные модули получают его через связывание, а проверка требует единственности. Заодно появилась проверка самого поведения: обрыв связи со страницы и обрыв из файла, открытого с устройства, — разные причины, и человеку говорится именно та, что случилась.')}\n    ${item('Листы проверяются так же, как экраны', 'Обход четырёх экранов ловил пустые значения и нечисла в вёрстке, но до листов не доставал — оттуда и вылез обвал рынка, посчитанный от нажатия. Теперь проверка открывает подряд план, итоги, правила, обвал, справочник инструментов, «Что нового» и размещение — на одном живоподобном портфеле и при молчащей бирже, — и не пропускает ни утечки, ни цены с точкой.')}\n    ${item('Потолки ожидания перестали спорить с арифметикой', 'На весь обход рынка стояло 60 секунд, а сумма внутренних потолков — доска ОФЗ, доска акций, истории выплат — выходила больше сотни. Обход мог не уложиться в срок, даже когда каждый ответ приходил за доли секунды, и снаружи его срезало вместе со всем собранным. Теперь поиск сам смотрит на часы: не хватает времени на класс — он его не начинает и помечает непроверенным. Срок внутри и потолок снаружи считаются из одной величины, разойтись им больше негде. Отдельно починен запасной путь запроса: при отказе он получал полный отсчёт заново, и запрос с заявленными двадцатью секундами занимал сорок; теперь ему достаётся остаток.')}\n    ${item('Половина сравнения лучше пустого раздела', 'Сравнение с рынком шло одним куском: доска ОФЗ уже собрана, доска акций упала — и раздел «Что можно поменять» оставался пустым целиком, будто биржа не отвечала вовсе. Теперь классы собираются порознь: что удалось — показывается, а под списком прямо написано, какую половину проверить не вышло и почему. Кандидаты класса попадают в список только целиком: иначе вышло бы худшее — фонды денежного рынка в кандидатах, а доходности своих облигаций не пришли, и приложение предложило бы обменять бумагу, о которой ничего не знает.')}\n    ${item('Цены пишутся по-русски, как и проценты', 'Правило про запятую было заведено для процентов и сроков, а цены остались сырым числом: на одном экране доля бумаги стояла с запятой, а цена рядом — с точкой. Разделитель теперь один во всём приложении — в портфеле, журнале, разборе бумаги, плане взноса и сверке с брокером. Знаки не округляются: у фондов цена вида 2,8045 ₽, и последний знак там не украшение. Проверка обходит все четыре экрана и не пропускает рубль с точкой.')}
+    ${item('Скрытые ошибки перестали быть скрытыми', 'Три последние найденные поломки — вызов функции из чужого модуля, чтение переменной, которой нет, и нажатие вместо числа — жили за пойманным и никому не показанным исключением. Приложение выглядело работающим и объясняло происходящее неправильно. Глотать ошибки местами приходится: одна не пришедшая история выплат не повод рушить экран. Глотать молча — нет. Теперь всё пойманное и не показанное попадает в список: место, текст, число повторов. Смотреть его в «Ещё» → «Диагностика», в самом низу. Пусто там — хороший знак; если экран ведёт себя странно, причина, скорее всего, лежит именно в этом списке.')}\n    ${item('Совет об обмене перестал обещать прошлогодний доход', 'Та же беда, что и в подписи, но дороже: карточка обмена писала «выплаты за 12 месяцев» и считала от них выгоду в рублях за год. У бумаги, переставшей платить, это выплаты позапрошлого года, а разница подавалась как будущий доход — по ней и принимается решение продать одну бумагу и купить другую. Оговорка «и то лишь если выплаты вернутся» оказалась полумерой: приложение всё равно звало платить комиссию и налог за доход, которого год никто не видел. Теперь такая бумага в советы об обмене не попадает вовсе. В списке идей она остаётся — смотреть на неё можно, менять на неё нельзя.')}\n    ${item('Инвестиционный комитет — и то, чего он про рынок не скажет', 'Сводка на сегодня собрана наверху: условия, главный риск, возможность, действие и уверенность вывода. Про «рынок позитивный или негативный» здесь сознательно ничего нет и не будет: данных, чтобы судить о направлении рынка, у приложения не появится, а выдать догадку за вывод — худшее, что может сделать советник. Вместо направления — УСЛОВИЯ из двух измеренных величин: во что обходятся деньги и что приносят бумаги. «Деньги стоят 16% годовых, бумаги приносят 10,7%» — это арифметика, а не предсказание, и решение из неё следует честно. Уверенность вывода тоже измеряется: это доля известных данных, а не ощущение. Когда ставка неизвестна, приложение так и пишет — условия не назвать, — и перечисляет, чего не хватает.')}\n    ${item('Красные флаги — до всех прочих разборов', 'То, что требует внимания сегодня, стоит наверху главного экрана, а не четвёртой строкой после прогноза на пять лет: человек с пустой подушкой должен узнать об этом первым. Флаг ставится только по измеренному. Отрицательная реальная доходность считается по формуле, а не вычитанием инфляции из доходности, и если доходность бумаг ещё не измерена — флага нет вовсе, потому что ставить его было бы не на чем.')}\n    ${item('История решений видна в журнале', 'Расчёт был готов, а на экране его не было — мёртвый расчёт хуже отсутствующего: он создаёт видимость работы. Теперь под лентой операций видно, как каждая сделка двигала риск: покупка защиты с 6,8 до 4,5, покупка ОФЗ с 7,0 до 6,8. Рядом сказано, почему, и оговорено, что риск на каждую дату пересчитан сегодняшней моделью, а не взят из сохранённой записи.')}\n    ${item('История решений считается из журнала, а не хранится', 'Видно, как менялся риск от собственных сделок: покупка защиты 5 августа увела его с 6,8 до 4,5, а первые покупки в мае — с десятки до восьми. Ничего для этого не хранится, и это принципиально. Портфель на любую дату восстанавливается из журнала, значит риск до и после каждой сделки считается ТОЙ ЖЕ моделью, что работает сегодня. Заведи мы запись «на тот момент риск был такой-то» — она разошлась бы с моделью при первой её правке, и история стала бы врать тем убедительнее, чем старше. Цены берутся нынешние: сделка оценивается по тому, как она изменила состав портфеля, а не по тому, угадана ли цена.')}\n    ${item('Объяснение риска перестало спорить само с собой', 'Фраза «снизился, потому что ухудшилась мера» выходила, когда причиной бралась самая крупная подвижка — даже направленная против итога. Теперь причина ищется среди мер, сдвинувшихся в ту же сторону, что и общий счёт, а если что-то двигалось против, об этом сказано отдельно: объяснение не должно выглядеть полнее, чем оно есть.')}\n    ${item('Карточка бумаги отвечает, что с ней делать', 'В карточке каждой позиции появился вердикт — держать, докупить, сократить или заменить — с числами, по которым он получен. Рядом: доля в портфеле, поток после налога, вклад в общий риск, доля своей отрасли и две чувствительности. У облигации отклик на ставку ИЗМЕРЯЕТСЯ по её сроку: 4,6 года — значит пункт ставки стоит 4,6% цены. У акции это допущение, и так и подписано. К курсу привязано только то, что к нему действительно привязано; про рублёвую бумагу написано «не считается», а не поставлен ноль — ноль означал бы знание, что связи нет, а её просто не измеряли.')}\n    ${item('Вклад бумаги в риск считался задом наперёд', 'Сначала я определил его как «насколько изменится индекс, если бумагу убрать». Проверил на портфеле — вклад вышел ОТРИЦАТЕЛЬНЫМ у всех бумаг сразу. Это не ошибка счёта, а негодное определение: изъятие любой позиции уменьшает портфель, доли остальных механически растут, и портфель «ухудшается». Получалось, что даже бумага, вылезшая за предел доли, числится снижающей риск. Теперь считается прямо: штраф тех мер, в которых виновата именно она. На нынешнем портфеле весь вклад даёт ОФЗ 26235 с её тридцатью процентами, у остальных — ноль, и это правда.')}\n    ${item('У каждого совета названо условие, при котором он ошибка', 'Совет, который нельзя опровергнуть, — не совет, а мнение: что бы ни случилось, задним числом он окажется прав. Теперь под выбранным действием стоят условия его ошибочности, и притом числами, которые можно проверить самому. Не «при неблагоприятном развитии событий», а «до предела в 25% на бумагу останется ещё столько-то рублей», «прибавка к выплатам — столько-то в год после налога, при урезании вдвое останется половина», «подушка ноль месяцев при цели три». Запас до предела считается от доли ПОСЛЕ покупки, а не от нынешней: от нынешней вышел бы противоположный вывод из тех же данных. Оговорка защищает автора совета, число защищает читателя.')}\n    ${item('Инвестиционный комитет — и чего он не делает', 'Наверху появилась сводка: условия, уверенность вывода, что сделать и почему. Про направление рынка в ней сознательно ничего нет — данных, чтобы судить, вырастет он или упадёт, у приложения не появится, и такой вывод был бы предсказанием, а не расчётом. Вместо него УСЛОВИЯ из двух измеренных величин: во что обходятся деньги и что приносят бумаги. Когда ключевая ставка 16%, а портфель даёт 10,7%, так и написано — вклад сейчас конкурирует с портфелем; и тут же сказано, что это не повод продавать, потому что ставка меняется, а состав портфеля рассчитан на годы. Уверенность вывода тоже измеряется, а не ощущается: это доля известных данных, и рядом перечислено, чего именно не хватает. Нет ставки — приложение так и говорит «условия не назвать», вместо того чтобы придумать бодрую фразу.')}\n    ${item('Красные флаги встали выше прогнозов', 'То, что требует внимания сегодня, показывается до всех разборов: человек с пустой подушкой не должен узнавать об этом четвёртой строкой после разброса на пять лет. Флаг ставится только по измеренному — перекос в одной бумаге, нехватка денег на счёте, пустая подушка, доход ниже инфляции. Последнее считается по формуле, а не вычитанием: при 5% годовых и инфляции 8% настоящий рост не −3%, а −2,8%. Если величина не измерена, флага нет вовсе: придумать его ради полноты списка значило бы соврать в самом опасном месте.')}\n    ${item('Рынок падает не единственным способом', 'Обвал акций приложение считало давно, но это лишь одна из бед. Ставка бьёт по облигациям, и тем сильнее, чем длиннее бумага. Слабый рубль поднимает всё, что привязано к валюте, — на этом портфеле золото, и портфель в таком сценарии не падает, а прибавляет. Урезанные вдвое выплаты не трогают цену бумаг вовсе: беднеет поток, а капитал остаётся. Показывать там просадку капитала было бы неправдой. Купоны при этом не режутся: они назначены договором, а не решением совета директоров. Для каждого сценария видно, сколько останется, какой класс дал главный вклад, каким станет риск-индекс и почему он изменился — словами. Про акции сказано честно: их отклик на ставку и курс у каждой компании свой, данных для этого нет, и там, где взято допущение, оно так и подписано.')}\n    ${item('Появился главный вывод на сегодня', 'Числа отвечают на «сколько», но не на «и что теперь». Одна фраза наверху собирает то же, что показано под ней: в норме ли портфель, какая мера слабее всех и хватит ли нынешнего темпа до цели. Собирается из тех же величин намеренно — фраза, посчитанная отдельно, рано или поздно начнёт спорить с числами под собой.')}\n    ${item('Советы выстраиваются по доминированию, а не по весам', 'Обычный способ ранжировать советы — сложить меры с коэффициентами вида «0,4 за риск, 0,3 за структуру». Это выглядит наукой, но числа берутся с потолка: обосновать, почему именно 0,4, нельзя, а результат зависит от них целиком. Здесь другой порядок. Сначала запреты: действие, поднимающее риск, усиливающее нарушение предела доли или оставляющее меньше денег, чем на месяц расходов, не занижается в списке — оно не показывается вовсе, а причина отказа названа. Затем доминирование: вариант лучше, если не хуже ни по одной из шести мер и лучше хотя бы по одной; здесь веса не нужны в принципе. Если никто никого не превосходит — берётся улучшающий больше мер сразу, а ничьи разрешаются объявленным порядком, а не случайностью: на одних и тех же данных ответ обязан быть одним и тем же. На главном экране появился блок «Сегодня стоит сделать» — не больше трёх пунктов, с разбором, почему выбран первый, и с честно названными мерами, которые при этом ухудшились.')}\n    ${item('Риск и прогноз цели вышли на главный экран', 'Считалось это давно, а показывалось на четвёртой вкладке: чтобы узнать, рискован ли портфель и дойдёт ли он до цели, надо было искать. Теперь на главном сразу: риск-индекс с полосой и тремя главными причинами по вкладу в штраф, разброс результата через пять лет, вероятность дойти до цели и сколько до неё не хватает. Числа намеренно грубые — «2,8 млн ₽», а не «2 148 273 ₽», и «вероятность низкая», а не «18,4%». Разброс считается по трём тысячам случайных траекторий: точность до рубля в нём была бы выдумкой, а сотая доля процента сообщала бы уверенность, которой у случайной модели нет.')}\n    ${item('План нарушал предел, ради которого сам же существует', 'Приложение не даёт докупать бумагу, чья доля перевалила за четверть портфеля. Но когда взнос велик и в предел не помещается НИКТО, выбор шёл по доходности выплат — и ею оказывалась самая крупная позиция. На портфеле в 191 тысячу взнос в 30 тысяч уводил долю одной бумаги с 23,5% сразу за 33%: совет прямо противоречил правилу, соблюдать которое требует. Теперь в таком случае выбирается бумага, нарушающая предел МЕНЬШЕ всех, и об этом сказано прямо — с будущей долей и с двумя способами обойтись без нарушения. На нынешнем портфеле это меняет и выбор бумаги, и итог: риск-индекс после взноса идёт вниз, а не вверх.')}\n    ${item('Каждый план показывает «было → станет»', 'Совет без последствия — это мнение. Теперь под раскладкой взноса стоит таблица: риск-индекс, доли трёх классов и свободные деньги до и после покупки, а неизменившееся так и помечено. План применяется к копии портфеля, и обе картины считаются одним и тем же кодом — иначе «до» и «после» рано или поздно разъедутся. Вероятность дойти до цели в таблицу не идёт намеренно: один взнос двигает её на доли процента, и показывать такое движение значило бы выдавать шум за результат.')}\n    ${item('Все пороги приложения сведены в один объект', 'Числа, по которым приложение судит о портфеле, лежали в четырёх наборах: пределы концентрации в советнике, допущения о рынке в ядре, свежесть выплат рядом, ставка налога отдельно. Пока они не пересекались, это сходило с рук — но стоит одному порогу появиться в двух местах, и карточки начинают спорить друг с другом, а найти, где правится число, становится негде. Теперь объект один, а прежние имена — не копии, а ссылки на него.')}\n    ${item('Появился риск-индекс портфеля от нуля до десяти', 'Карточки говорят про каждую беду отдельно: тут концентрация, там нет защиты, здесь пустой резерв. Понять по ним, стало ли в целом хуже после покупки, невозможно — а именно это и нужно, чтобы сравнить два решения. Индекс складывает пять мер: доля одной бумаги, доля одной отрасли, защитные активы, коридор облигаций и свободные деньги в месяцах расходов. Штраф растёт плавно, а не рывком: бумага на 26% и бумага на 60% — разные портфели. Если расходы не заданы, мера про деньги не считается вовсе, а не даёт нулевой штраф: иначе портфель выглядел бы безопаснее просто потому, что про него меньше известно.')}\n    ${item('Машинных дат больше нет ни на одном экране', 'Проверку на дату вида «2026-08-04» вместо «04.08.2026» я поставил там, где такую дату нашёл, — на листе разбора операции. Правильно ставить её везде: одна величина в двух видах это одна и та же беда, где бы она ни вылезла. Теперь на машинную дату смотрят все четыре экрана и все листы. Отметку сборки проверка отличает от даты и не путает их. Заодно сама отметка догнала календарь: сборки шли под шестым августа до буквы «z», хотя на дворе девятое.')}\n    ${item('Половина обмена не знала про лоты', 'В плане обмена покупка считалась лотами, а продажа делала вид, что лотов нет: размер лота вычислялся, клался в результат и не использовался нигде. Между тем позиция не всегда делится на лот нацело — 124 штуки при лоте из десяти это 12 лотов и ещё 4 штуки, которые уходят отдельной заявкой. Теперь состав назван у обеих половин операции, и остаток тоже. Лист подтверждения обмена вообще не проверялся до сих пор: он берёт идею по номеру из прошлого поиска, и чтобы его открыть, набор сначала наполняет список замен отрисовкой — как это делает само приложение.')}\n    ${item('Дата в разборе операции была машинной', 'Нажимаешь операцию в журнале — и в карточке стоит «2026-08-04», тогда как строкой выше в самой ленте написано «04 авг». Одна и та же величина в двух видах на соседних экранах. Нашлось расширением обхода на листы, которым нужен довод: карточка бумаги, разбор операции, загрузка отчёта. Теперь проверка не пропустит машинную дату ни на одном листе.')}\n    ${item('Проверка набора разделена на быструю и полную', 'Полный прогон гоняет весь набор по разу на каждую из двух сотен подсаженных поломок и занимает четыре минуты. Ждать их после каждой мелкой правки — верный способ перестать запускать проверку вовсе. Теперь есть быстрый режим: только тесты, две секунды. Полный остаётся обязательным перед выкладкой, и быстрый прямо говорит, что мутационную часть не запускал: «зелено» после быстрого прогона и после полного — разные утверждения.')}\n    ${item('Заметка о копейках дошла до экрана, а не осталась в хранилище', 'Расхождение по деньгам записывалось со сверки — и не показывалось нигде. Записать и никому не показать это то же самое, что скрыть: человек видит в диагностике два разных числа и не знает, поломка это или округление. Теперь заметка выводится там же, под строкой денег.')}\n    ${item('Срок до погашения печатался бы с хвостом в двенадцать знаков', 'Разбор собственной вчерашней правки: годы обернули в ту же запись, что и цены, а она намеренно не округляет — у фондов последний знак цены не украшение. Но срок до погашения нигде не округлялся, и на карточке облигации встало бы «4,602739726027397 лет». Теперь годы идут через запись с одной десятой, а сам срок и размер ближайшей выплаты округляются там, где считаются: округлять при показе — значит однажды забыть об этом в одном из мест.')}\n    ${item('«Выплат за год» больше не обещает доход, которого нет', 'На карточке бумаги стояло «22,6% выплат за год», а строкой ниже — «последняя выплата 14 мес назад». Оба утверждения были правдой по отдельности: окно доходности отсчитывается назад от ПОСЛЕДНЕЙ выплаты, иначе годовой плательщик, заплативший одиннадцать месяцев назад, показывал бы ноль. Но у бумаги, переставшей платить, подпись превращалась в обещание текущего дохода. Теперь у таких бумаг написано прямо: «22,6% за год до последней выплаты (03.06.2025)». Число то же, смысл — честный.')}\n    ${item('Ещё шесть чисел с точкой и сеть пошире', 'Правило про запятую держалось на поиске toFixed, а дробь бывает и без него: срок до цели, выплата на бумагу за год, срок до погашения облигации и размер ближайшей выплаты в календаре печатались с точкой. Проверка теперь смотрит на отрисованные экраны — на число с точкой перед любой единицей, а не только перед рублём, — и отдельно на исходник: дробь перед единицей обязана идти через русскую запись. Целые величины перечислены поимённо, а не пропущены по маске.')}\n    ${item('Диагностика перестала спорить со сверкой', 'Сверка принимала копеечное расхождение по деньгам, а диагностика тут же красила те же деньги красным как поломку. Теперь у обеих один допуск, а рядом с числами написано, сколько из этого — округление.')}\n    ${item('Копейки перестали блокировать журнал', 'Сверка отвергала журнал при расхождении в деньгах больше рубля. Но деньги — это остаток: в них стекается округление КАЖДОЙ операции за всё время, тогда как бумаги сходятся точно, штука в штуку. На истории из полусотни операций жёсткий рубль означал вечный отказ, а совет «попробуй ещё раз через минуту» не мог помочь никогда: пересборка даёт ровно тот же остаток. Теперь допуск растёт с длиной истории — полтинник на операцию, не больше шестидесяти рублей всего. Пропущенная операция так не спрячется: самая мелкая из них крупнее допуска. Само расхождение не исчезает бесследно — оно записано и видно в диагностике.')}\n    ${item('Проданные бумаги перестали быть безымянными навсегда', 'Журнал не пересобирался с сообщением «брокер не назвал имена N бумаг». Причина: имя бумаги спрашивалось только по внутреннему коду, а у части операций брокер отдаёт лишь FIGI. Бумагу, которой уже нет в портфеле, взять больше неоткуда — и она оставалась безымянной навсегда, сколько ни повторяй. Теперь справочник спрашивается обоими способами. Найденные по операциям имена запоминаются под обоими кодами: раньше запоминались только бумаги ИЗ ТЕКУЩЕГО портфеля, поэтому после первой же полной пересборки проданные терялись. И сообщение теперь называет сами коды: «не назвал имена 19 бумаг» без перечисления не оставляло ни одной зацепки.')}\n    ${item('Приложение перестало обвинять токен, не проверив его', 'Надпись «прошлый токен не сработал, возможно истёк или отозван» появлялась без единого обращения к брокеру — просто по факту пустого журнала. Между тем самая частая причина другая: теряется отметка счёта, и тогда обновление молча не начинается вовсе, сколько бы раз ни вводить один и тот же рабочий токен. Теперь приложение сначала спрашивает брокера. Токен принят — отметка счёта восстанавливается сама, журнал собирается, и человек ничего не вводит. Токен отвергнут — так и сказано, вместе с ответом брокера. Нет связи — сказано про связь. Заодно все четыре места, где журнал пересобирается принудительно, защищены от перезагрузки посреди записи: проверка требует этого от каждого.')}\n    ${item('Рабочий токен больше не объявляется сломанным', 'Пустой журнал приложение объясняло единственным способом: «прошлый токен не сработал, всё показанное устарело, введи новый». Но пустым журнал бывает и когда токен в полном порядке — например, если пересборка оборвалась на середине. Теперь случаи различаются: если данные по токену уже когда-то приходили, приложение так и говорит — дело не в токене — и предлагает собрать журнал заново одной кнопкой, называя дату последней удачной загрузки. Заодно закрыта причина: перезагрузка ради обновления больше не может случиться посреди записи журнала, а ждёт её окончания.')}\n    ${item('Разбор собственной правки: семь мест, где обновление ещё могло не доехать', 'Проверка выложенного накануне механизма нашла: оболочка клалась под одним адресом из двух, и офлайн зависел от того, какой из запросов при установке удался; отказ сервера при выкладке показывал пустой экран вместо сохранённой копии; тихое обновление копии не доживало до конца — обработчик усыпляли раньше; подписки на сообщения ставились после регистрации, и сообщение могло пропасть; самая первая установка вызывала лишнюю перезагрузку у нового человека; второе нажатие кнопки в течение минуты не делало ничего; а перепроверка обработчика зависела от опроса версии, который при переходе со старого обработчика вправе соврать. Исправлено всё семь.')}\n    ${item('Обновление перестало зависеть от везения', 'Приложение спрашивало сервер о новой сборке, скачивая самого себя. Но страницу, которой управляет служебный обработчик, нельзя обойти своим запросом: ни принудительное чтение, ни довесок в адресе не помогают — обработчик стоит перед кэшем браузера и отвечает первым. Проверка читала не сервер, а его копию, и делала вывод «всё свежее». Круг замыкался: приложение не обновлялось и честно докладывало, что не нужно. Теперь версия спрашивается у файла обработчика — за ним браузер ходит мимо всех копий, и он в тысячу раз меньше приложения. Кнопка обновления больше не снимает обработчик перед перезагрузкой (снятие завершается лишь после закрытия всех вкладок, а до тех пор отвечает он же), а просит его выбросить копии и уступить место. Перезагрузка делается по факту смены обработчика, а не по надежде.')}\n    ${item('Экраны и листы проверяются на четырнадцати краевых счетах', 'К пяти краевым случаям добавились ещё девять: обнулившиеся цены, достигнутая цель, нулевой срок цели, счёт из одной защиты, незаданная цель, нулевой взнос, продано больше купленного. На каждом открываются и листы, и все четыре экрана — причём состояние берётся так же, как его берёт сама отрисовка, а не собирается руками: иначе проверялась бы выдумка. Кроме пустых значений и нечисел теперь ловится и бесконечность — её даёт деление на ноль, и в вёрстку она попадает молча.')}\n    ${item('Пустой счёт больше не роняет проверку на обвал', 'Лист брал самую просевшую и самую устойчивую бумагу первой и последней строкой списка — а если бумаг нет вовсе, списка тоже нет, и лист падал целиком: вместо ответа человек видел ошибку запуска. Такое бывает у каждого дважды: когда счёт только открыт и когда всё продано. Теперь в этом случае сказано прямо — падать нечему, деньги на счёте рынок не двигает. Заодно листы стали проверяться на пяти краевых портфелях: пустой счёт, одни деньги, бумага без известной цены, позиция, проданная в ноль, и незаданные расходы.')}\n    ${item('Заголовки месяцев в журнале встали в правильный падеж', 'Над лентой стояло «ИЮНЯ 2026» — обрывок фразы «16 июня», а не заголовок. Список названий был один на два разных случая: в дате месяц отвечает на вопрос «когда» и стоит в родительном, а заголовок группы — это название месяца само по себе, именительный. Теперь списка два, и проверка отрисованного журнала не пропустит возврат.')}\n    ${item('Опечатка в имени метода больше не доживёт до экрана', 'Соседний класс к «имени, которого нет»: вызов несуществующего метода падает с «это не функция», а потолок ожидания такую ошибку глотает — и снова получается «биржа не ответила» при исправной бирже. Теперь проверка собирает все списки экспорта модулей и сверяет с ними каждый вызов через store, moex и остальные псевдонимы. Заодно расширена проверка областей видимости: она смотрит и на стрелочные помощники, а не только на объявления функций.')}\n    ${item('Сравнение двух бумаг падало при каждом нажатии', 'Расчёт сравнения читал настройки из переменной, которой в нём нет, — ровно та же ошибка, что и в разборе выплат, только в другом месте. Обработчик кнопки исключений не ловит, поэтому лист просто замирал без единого слова. Теперь настройки приходят доводом. И появилась проверка, считающая область видимости КАЖДОЙ функции отдельно: прежняя смотрела, объявлено ли имя где-то в файле, а такие ошибки и живут там, где имя объявлено во множестве соседних функций, но не в этой.')}\n    ${item('Ставки перестали спорить с остальными числами', 'Правило про запятую стерегло десятые, но не сотые: ключевая ставка и купонная ставка печатались с точкой рядом с долями, где стоит запятая. Переведены и они, а правило расширено — теперь оно смотрит и на сотые, а не только на десятые.')}\n    ${item('Скрытые ошибки стали сетью, а не просто списком', 'Приложение давно записывает ошибки, которые проглотил потолок ожидания, и показывает их в диагностике. Теперь на этот список смотрит и стенд: он открывает все листы подряд и валит сборку, если среди проглоченного оказалась ошибка кода — обращение к тому, чего нет. От сети такие ошибки не зависят, значит списывать их на биржу нельзя. Обе поломки этой недели ловятся этой сетью автоматически.')}\n    ${item('Купоны и дивиденды не приходили из-за опечатки', 'Разбор выплат по портфелю читал состояние приложения из переменной, которой в этой функции нет и не было. При подключённом брокере вызов падал сразу же — всегда. Ошибку глотал потолок ожидания, план получал пустые выплаты и писал, что биржа не ответила, — при полностью доступной бирже. Тот же разбор кормит и карточку «Сколько приносит портфель». Ошибку нашла новая проверка листов: в браузере она пряталась за проглоченным исключением, а на стенде видна сразу.')}\n    ${item('Запрос к бирже теперь один, а не две копии', 'Тело запроса и запасного пути к нему лежали в файле дважды — в слое биржи и в слое фактов о бумагах. Проверка стерегла их побайтовое совпадение, но чинить две одинаковые функции руками — способ однажды ошибиться: правку внесут в одну, а во вторую скопируют с опечаткой. Теперь тело одно, остальные модули получают его через связывание, а проверка требует единственности. Заодно появилась проверка самого поведения: обрыв связи со страницы и обрыв из файла, открытого с устройства, — разные причины, и человеку говорится именно та, что случилась.')}\n    ${item('Листы проверяются так же, как экраны', 'Обход четырёх экранов ловил пустые значения и нечисла в вёрстке, но до листов не доставал — оттуда и вылез обвал рынка, посчитанный от нажатия. Теперь проверка открывает подряд план, итоги, правила, обвал, справочник инструментов, «Что нового» и размещение — на одном живоподобном портфеле и при молчащей бирже, — и не пропускает ни утечки, ни цены с точкой.')}\n    ${item('Потолки ожидания перестали спорить с арифметикой', 'На весь обход рынка стояло 60 секунд, а сумма внутренних потолков — доска ОФЗ, доска акций, истории выплат — выходила больше сотни. Обход мог не уложиться в срок, даже когда каждый ответ приходил за доли секунды, и снаружи его срезало вместе со всем собранным. Теперь поиск сам смотрит на часы: не хватает времени на класс — он его не начинает и помечает непроверенным. Срок внутри и потолок снаружи считаются из одной величины, разойтись им больше негде. Отдельно починен запасной путь запроса: при отказе он получал полный отсчёт заново, и запрос с заявленными двадцатью секундами занимал сорок; теперь ему достаётся остаток.')}\n    ${item('Половина сравнения лучше пустого раздела', 'Сравнение с рынком шло одним куском: доска ОФЗ уже собрана, доска акций упала — и раздел «Что можно поменять» оставался пустым целиком, будто биржа не отвечала вовсе. Теперь классы собираются порознь: что удалось — показывается, а под списком прямо написано, какую половину проверить не вышло и почему. Кандидаты класса попадают в список только целиком: иначе вышло бы худшее — фонды денежного рынка в кандидатах, а доходности своих облигаций не пришли, и приложение предложило бы обменять бумагу, о которой ничего не знает.')}\n    ${item('Цены пишутся по-русски, как и проценты', 'Правило про запятую было заведено для процентов и сроков, а цены остались сырым числом: на одном экране доля бумаги стояла с запятой, а цена рядом — с точкой. Разделитель теперь один во всём приложении — в портфеле, журнале, разборе бумаги, плане взноса и сверке с брокером. Знаки не округляются: у фондов цена вида 2,8045 ₽, и последний знак там не украшение. Проверка обходит все четыре экрана и не пропускает рубль с точкой.')}
     ${item('Разбор облигаций падал на каждой бумаге', 'Тип купона ОФЗ читается из номера серии — но функция чтения живёт в ядре, а зовут её из модуля биржи, и модули друг друга не видят. Разбор ЛЮБОЙ облигации падал с «ofzKind is not defined», доска ОФЗ не собиралась, а наружу это выходило как «биржа не ответила за 60 секунд»: доска нужна и покупкам, и заменам. Проверка теперь читает файл целиком и ловит такой вызов между любыми двумя модулями, а не только на границе с интерфейсом.')}
     ${item('Лист обвала считался от нажатия, а не от процента', 'Кнопка обвала была повешена на функцию с доводом напрямую. Браузер зовёт обработчик С СОБЫТИЕМ мыши — оно и занимало место глубины падения, значение по умолчанию не срабатывало, и весь лист считался от объекта события: в заголовке стояло нечисло, в потерях — «не число ₽», у худшей и лучшей бумаги вместо процентов пусто́е. Теперь довод проверяется на входе, а проверка следит, чтобы ни один обработчик кнопки не принимал доводов.')}
     ${item('«Биржа не ответила» больше не выдумывает молчание', 'Раздел писал «биржа не ответила за 60 секунд», а диагностика в ту же минуту получала ответ за 0,2 с. Оба были правы: потолок ожидания подменял результат одинаково и когда время вышло, и когда биржа ответила отказом, а надпись знала только про молчание. Теперь три случая различаются: биржи не видно вовсе, биржа ответила отказом (текст отказа показан) и поиск не уложился в срок. И сказано главное: потолок стоит на весь обход рынка — доски акций и ОФЗ, список фондов, по одной истории выплат на бумагу, — а не на один запрос. Быстрая биржа и долгий обход противоречат друг другу только на вид.')}
@@ -10083,7 +11428,15 @@ async function openSwapPlan(index) {
     <p class="muted" style="margin:0 0 12px;line-height:1.6">Числа — оценка по последней известной цене.
       В момент сделки цена будет другой, поэтому ниже названы границы, за которыми обмен перестаёт окупаться.</p>
 
-    ${step(1, `Продать ${plan.sellQty} шт ${esc(plan.fromName)}`,
+    ${step(1, `Продать ${plan.sellQty} шт ${esc(plan.fromName)}${
+      // Состав в лотах — как в шаге покупки ниже. Размер лота считался, клался
+      // в результат и не использовался нигде: половина одной операции знала
+      // про лоты, вторая нет. А если позиция не делится на лот нацело, остаток
+      // продаётся отдельной заявкой, и узнать об этом лучше заранее.
+      plan.sellLot > 1
+        ? ` (${Math.floor(plan.sellQty / plan.sellLot)} по ${plan.sellLot}${
+            plan.sellQty % plan.sellLot ? ` и ещё ${plan.sellQty % plan.sellLot} шт неполным лотом` : ''})`
+        : ''}`,
       `Лимитная заявка, цена <b>не ниже ${dec(plan.minSell.toFixed(2))} ₽</b> (сейчас ${dec(plan.sellPrice.toFixed(2))} ₽).
        Ниже этой границы теряется больше, чем даёт обмен за год.
        Выручка после комиссии — примерно <b>${money(plan.proceeds)}</b>.`)}
@@ -10266,6 +11619,7 @@ async function openCrashTest(drop = -0.30) {
   // число ₽». Довод, пришедший снаружи, обязан быть проверен здесь.
   if (typeof drop !== 'number' || !Number.isFinite(drop) || drop >= 0) drop = -0.30;
   const r = await store.crashTest(drop);
+  const st0 = await store.getState();   // нужен сценариям ниже
   const worst = r.items[0], best = r.items[r.items.length - 1];
   // Бумаг может не быть вовсе — счёт только открыли или всё продано. Тогда
   // «сильнее всех просядет» не о чем: раньше строка ниже читала свойство у
@@ -10309,6 +11663,37 @@ async function openCrashTest(drop = -0.30) {
       <button class="btn ghost" id="bC30" style="flex:1">−30%</button>
       <button class="btn ghost" id="bC50" style="flex:1">−50%</button>
     </div>
+
+    ${(() => {
+      // Рынок падает не единственным способом. Портфель, стойкий к обвалу
+      // акций, бывает беззащитен перед ставкой — и наоборот. Поэтому рядом
+      // с обвалом стоят ещё три беды и все они сразу.
+      const list = store.stressScenarios(st0, null);
+      if (!list.length) return '';
+      const rows = list.map(r => {
+        const grew = r.drop < 0;
+        return `<div style="padding:8px 0;border-top:1px solid var(--line)">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <b>${esc(r.title)}</b>
+            <span style="color:${grew ? 'var(--ok)' : 'var(--danger)'}">${
+              grew ? '+' : '−'}${money(Math.abs(r.drop))} · ${pct(Math.abs(r.dropPct))}</span>
+          </div>
+          <div class="muted" style="line-height:1.6">${esc(r.hint)}. Останется ${money(r.after)}.</div>
+          <div class="diff">${r.contrib.filter(c => Math.abs(c.delta) >= 1)
+            .map(c => `${esc(c.label)} ${c.delta < 0 ? '−' : '+'}${money(Math.abs(c.delta))}`)
+            .join(' · ') || 'цены бумаг не меняются'}</div>
+          ${r.income.known && Math.abs(r.income.to - r.income.from) >= 1
+            ? `<div class="diff">Выплаты за год: ${money(r.income.from)} → ${money(r.income.to)}</div>` : ''}
+          ${r.risk ? `<div class="diff">Риск: ${dec1(r.risk.before)} → ${dec1(r.risk.after)}
+            — ${esc(r.risk.band)}${r.risk.why ? `<br><span class="muted">${esc(r.risk.why)}</span>` : ''}</div>` : ''}
+          ${r.assumed ? `<div class="muted">Здесь есть допущение: как акции отзовутся на ставку и курс,
+            у каждой компании по-своему, и точных данных об этом у приложения нет.</div>` : ''}
+        </div>`;
+      }).join('');
+      return `<div style="margin-top:16px">
+        <div style="font-weight:700;font-size:15px;margin-bottom:4px">Другие беды, не только обвал</div>
+        ${rows}</div>`;
+    })()}
 
     <div class="muted" style="margin-top:14px;line-height:1.7">
       Падение на 30% случалось на российском рынке не раз и занимало месяцы, а восстановление — годы.
@@ -10365,7 +11750,7 @@ async function openCashflow() {
             <b>${esc(n.name || n.ticker)}</b>
             <span style="white-space:nowrap">${money(n.net)}</span>
           </div>
-          <div class="muted">отсечка ${String(n.date).split('-').reverse().join('.')} · ${n.perShare} ₽ на бумагу</div>
+          <div class="muted">отсечка ${String(n.date).split('-').reverse().join('.')} · ${dec(n.perShare)} ₽ на бумагу</div>
         </div>`).join('')}
         <div class="muted" style="margin-top:8px">Чтобы получить выплату, бумага должна быть в портфеле на день отсечки.</div>`;
     }
@@ -10395,7 +11780,7 @@ async function openOperation(id) {
   }
 
   openSheet(`<h2 style="margin:0 0 6px;font-size:19px">${names[o.type] || o.type}</h2>
-    <p class="muted" style="margin:0 0 14px">${o.date}${o.note ? ' · ' + esc(o.note) : ''}</p>
+    <p class="muted" style="margin:0 0 14px">${/* Человеческая дата, а не машинная: тут стояло сырое «2026-08-04», тогда как в журнале рядом «04 авг». */ String(o.date).split('-').reverse().join('.')}${o.note ? ' · ' + esc(o.note) : ''}</p>
     <div class="diff">Сумма: <b>${money(o.amount)}</b></div>
     ${o.ticker ? `<div class="diff">Бумага: <b>${esc(o.ticker)}</b></div>` : ''}
     ${o.qty ? `<div class="diff">${o.qty} шт по ${dec(o.price)} ₽${o.fee ? ' · комиссия ' + dec(o.fee) + ' ₽' : ''}</div>` : ''}
@@ -10451,8 +11836,35 @@ async function openSecurity(ticker) {
     facts = '<div class="muted">Не удалось загрузить данные — проверь интернет.</div>';
   }
 
+  // Разбор позиции: что она делает в портфеле и что с ней делать сейчас.
+  const card = SH.positionCard(st0, ticker,
+    { yields: f.known && f.yieldPct > 0 ? { [ticker]: f.yieldPct } : {} });
+
   openSheet(`<h2 style="margin:0 0 4px;font-size:19px">${esc(p.name)}</h2>
     <p class="muted" style="margin:0 0 14px">${p.qty} шт · средняя ${dec(p.avgPrice)} ₽ · сейчас ${dec(p.price)} ₽${p.priceIsMarket ? '' : ' (цена покупки)'}</p>
+    ${card ? `<div class="act" style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <b style="font-size:16px">Вердикт: ${esc(card.verdict)}</b>
+        <span class="muted">роль — ${esc(card.role)}</span>
+      </div>
+      <div class="diff">${esc(card.why)}</div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
+        <div class="diff">Доля в портфеле ${pct(card.share)} · ${money(card.value)}</div>
+        ${card.income != null
+          ? `<div class="diff">Приносит ${money(card.income)} в год после налога</div>` : ''}
+        <div class="diff">Вклад в общий риск: ${card.riskAdd > 0
+          ? `<b style="color:var(--warn)">${dec1(card.riskAdd)}</b> из ${dec1(card.riskNow)}`
+          : 'ничего не портит'}</div>
+        ${card.sectorShare != null
+          ? `<div class="diff">Отрасль «${esc(card.sector)}» занимает ${pct(card.sectorShare)} портфеля</div>` : ''}
+        <div class="diff">Ставка +1 п.п.: ${card.rate.pct != null
+          ? `${pct(card.rate.pct)} цены` : 'не считается'}
+          <span class="muted">(${esc(card.rate.note)})</span></div>
+        <div class="diff">Рубль −1%: ${card.fx.pct != null
+          ? `${pct(card.fx.pct)} цены` : 'не считается'}
+          <span class="muted">(${esc(card.fx.note)})</span></div>
+      </div>
+    </div>` : ''}
     ${st0.costIsApproximate ? `<div class="diff" style="color:var(--warn)">
       Цена покупки неизвестна — прибыль по этой бумаге не считается.
       Посмотри среднюю в приложении брокера и впиши.</div>
